@@ -4,6 +4,7 @@ using GB_NewCadPlus_IV.UploadApi.Filters;
 using Microsoft.AspNetCore.Mvc; // 引入 ASP.NET Core MVC 核心功能
 using MySql.Data.MySqlClient;   // 引入 MySQL 数据库驱动
 using System.Data;          // 引入数据操作相关命名空间
+using System.Data.Common;
 using System.Security.Cryptography; // 引入加密哈希算法命名空间
 using System.Text.Json;     // 引入 JSON 序列化命名空间
 
@@ -40,6 +41,16 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
         [RequestSizeLimit(1024L * 1024L * 1024L)]
         public async Task<IActionResult> UploadAsync()
         {
+            // ========== 新增：处理“仅替换预览图”的请求 ==========
+            if (Request.Form.TryGetValue("replacePreviewOnly", out var replaceOnly) && replaceOnly == "true")
+            {
+                _logger.LogInformation("[ReplacePreview] 检测到替换预览图请求（replacePreviewOnly=true）");
+                if (!int.TryParse(Request.Form["replacePreviewId"], out int replaceStorageId) || replaceStorageId <= 0)
+                {
+                    return BadRequest(new { success = false, message = "replacePreviewId 无效。" });
+                }
+                return await ReplacePreviewCoreAsync(replaceStorageId);
+            }
             // ============================
             // 1. 提取文件（这两个必须通过 IFormFile 参数接收，这里改为直接从 Request.Form.Files 获取）
             // ============================
@@ -264,6 +275,92 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             }
         }
 
+
+        /// <summary>
+        /// 替换预览图的核心业务逻辑（供 UploadAsync 和 ReplacePreviewAsync 共用）
+        /// </summary>
+        private async Task<IActionResult> ReplacePreviewCoreAsync(int storageId)
+        {
+            try
+            {
+                // 1. 检查记录是否存在
+                var row = await GetStorageRowAsync(storageId);
+                if (row == null)
+                    return NotFound(new { success = false, message = "图元记录不存在。" });
+
+                // 2. 提取上传的预览图文件
+                IFormFile? previewFile = Request.Form.Files.GetFile("previewFile");
+                if (previewFile == null || previewFile.Length == 0)
+                    return BadRequest(new { success = false, message = "previewFile 不能为空。" });
+
+                // 3. 确定存储目录（基于已有记录的路径，保持目录不变）
+                string directory = Path.GetDirectoryName(ResolvePhysicalPath(row))!;
+                if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+                    return StatusCode(500, new { success = false, message = "原始存储目录不可用。" });
+
+                // 4. 删除旧预览图（如果存在）
+                string? oldPreviewPath = row.PreviewImagePath;
+                if (!string.IsNullOrWhiteSpace(oldPreviewPath) && System.IO.File.Exists(oldPreviewPath))
+                {
+                    try { System.IO.File.Delete(oldPreviewPath); } catch { }
+                }
+
+                // 5. 保存新预览图
+                string ext = Path.GetExtension(previewFile.FileName);
+                if (string.IsNullOrWhiteSpace(ext)) ext = ".png";
+                string newFileName = Guid.NewGuid().ToString() + ext;
+                string newPath = Path.Combine(directory, newFileName);
+
+                await using (var stream = new FileStream(newPath, FileMode.Create))
+                {
+                    await previewFile.CopyToAsync(stream);
+                }
+
+                // 6. 更新数据库记录
+                var dbType = GetDatabaseType();
+                string updateSql = dbType == "DM"
+                    ? $"UPDATE {_configuration["Database:Schema"] ?? "CAD_SW_LIBRARY"}.CAD_FILE_STORAGE SET preview_image_name = :Name, preview_image_path = :Path WHERE id = :Id"
+                    : "UPDATE cad_file_storage SET preview_image_name = @Name, preview_image_path = @Path WHERE id = @Id";
+
+                using var conn = dbType == "DM" ? (DbConnection)new DmConnection(GetActiveConnectionString("DM"))
+                                                 : new MySqlConnection(GetActiveConnectionString("MySQL"));
+                await conn.OpenAsync();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = updateSql;
+
+                var pName = cmd.CreateParameter();
+                pName.ParameterName = dbType == "DM" ? ":Name" : "@Name";
+                pName.Value = newFileName;
+                cmd.Parameters.Add(pName);
+
+                var pPath = cmd.CreateParameter();
+                pPath.ParameterName = dbType == "DM" ? ":Path" : "@Path";
+                pPath.Value = newPath;
+                cmd.Parameters.Add(pPath);
+
+                var pId = cmd.CreateParameter();
+                pId.ParameterName = dbType == "DM" ? ":Id" : "@Id";
+                pId.Value = storageId;
+                cmd.Parameters.Add(pId);
+
+                await cmd.ExecuteNonQueryAsync();
+
+                _logger.LogInformation($"预览图已替换：storageId={storageId}, newPath={newPath}");
+                return Ok(new { success = true, message = "预览图替换成功", previewImagePath = newPath });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "替换预览图失败");
+                return StatusCode(500, new { success = false, message = "服务器内部错误: " + ex.Message });
+            }
+        }
+
+        [HttpPut("{storageId}/preview")]
+        [RequestSizeLimit(10L * 1024L * 1024L)]
+        public async Task<IActionResult> ReplacePreviewAsync([FromRoute] int storageId)
+        {
+            return await ReplacePreviewCoreAsync(storageId);
+        }
         #endregion
 
         #region 读取接口
