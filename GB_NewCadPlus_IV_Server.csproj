@@ -9,17 +9,13 @@
     <!-- 启用隐式 using -->
     <Version>1.0.1</Version>
     <!-- 程序集语义版本号（可根据发布流程变更） -->
-    <AssemblyVersion>1.26.0525.002</AssemblyVersion>
+    <AssemblyVersion>1.26.0530.004</AssemblyVersion>
     <!-- 程序集版本（建议随重大变更更新） -->
-    <FileVersion>1.26.0525.002</FileVersion>
+    <FileVersion>1.26.0530.004</FileVersion>
     <!-- 文件版本（便于发布包/部署查看） -->
-    <InformationalVersion>1.26.0525.002</InformationalVersion>
+    <InformationalVersion>1.26.0530.004</InformationalVersion>
     <!-- 可包含 Git SHA 或语义版本扩展 -->
   </PropertyGroup>
-
-  <ItemGroup>
-    <None Include="Controllers\HealthController.cs" />
-  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Dapper" Version="2.1.66" />

@@ -170,12 +170,11 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
                 _logger.LogError(ex, "获取存储根路径失败");
                 return StatusCode(500, new { success = false, message = "服务器存储配置错误，请联系管理员。" });
             }
-
+            // 安全检查：确保 categoryType 仅包含允许的值，防止路径遍历攻击
             string categoryDir = Path.Combine(root, categoryType!, finalCategoryId.ToString());
-
             try
             {
-                Directory.CreateDirectory(categoryDir);
+                Directory.CreateDirectory(categoryDir);// 创建目录，如果已存在则无影响
                 _logger.LogInformation($"[Step-3] 文件目录准备就绪: {categoryDir}");
             }
             catch (Exception ex)
@@ -184,46 +183,53 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
                 return StatusCode(500, new { success = false, message = "服务器存储路径不可用。" });
             }
 
-            string dwgExt = Path.GetExtension(dwgFile.FileName);
-            if (string.IsNullOrWhiteSpace(dwgExt)) dwgExt = ".dwg";
-            string dwgStoredName = Guid.NewGuid().ToString() + dwgExt;
-            string dwgPath = Path.Combine(categoryDir, dwgStoredName);
-
-            await using (var fs = new FileStream(dwgPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            string dwgExt = Path.GetExtension(dwgFile.FileName);// 获取文件扩展名
+            if (string.IsNullOrWhiteSpace(dwgExt)) dwgExt = ".dwg";// 默认扩展名为 .dwg
+            string dwgStoredName = Guid.NewGuid().ToString() + dwgExt; // 生成唯一的存储文件名，避免冲突
+            string dwgPath = Path.Combine(categoryDir, dwgStoredName); // 最终的文件存储路径
+            // 安全检查：确保最终路径在预期目录下，防止路径遍历攻击
+            if (!dwgPath.StartsWith(categoryDir))
+            {
+                _logger.LogError($"[Step-4 Error] 路径不合法: {dwgPath}");
+                return StatusCode(400, new { success = false, message = "请求参数不合法。" });
+            }
+            await using (var fs = new FileStream(dwgPath, FileMode.Create, FileAccess.Write, FileShare.None)) // 以独占方式创建文件流，确保文件写入过程中不被其他进程访问
             {
                 await dwgFile.CopyToAsync(fs);
             }
             _logger.LogInformation($"[Step-4] 主文件落盘成功: {dwgPath}, Size: {dwgFile.Length} bytes");
 
+
             // 预览图（可选）
-            string? previewStoredName = null;
-            string? previewPath = null;
-            if (previewFile != null && previewFile.Length > 0)
+            string? previewStoredName = null; // 预览图的存储文件名，默认为 null，如果上传了预览图则生成唯一文件名
+            string? previewPath = null; // 预览图的存储路径，默认为 null，如果上传了预览图则生成完整路径
+            if (previewFile != null && previewFile.Length > 0) // 如果上传了预览图且文件大小大于 0，则处理预览图的存储
             {
-                string pe = Path.GetExtension(previewFile.FileName);
-                if (string.IsNullOrWhiteSpace(pe)) pe = ".png";
-                previewStoredName = Guid.NewGuid().ToString() + pe;
-                previewPath = Path.Combine(categoryDir, previewStoredName);
+                string pe = Path.GetExtension(previewFile.FileName); // 获取预览图的扩展名
+                if (string.IsNullOrWhiteSpace(pe)) pe = ".png"; // 默认扩展名为 .png
+                previewStoredName = Guid.NewGuid().ToString() + pe; // 生成唯一的预览图存储文件名，避免冲突
+                previewPath = Path.Combine(categoryDir, previewStoredName); // 预览图的完整存储路径
+                // 安全检查：确保预览图路径在预期目录下，防止路径遍历攻击
                 await using (var ps = new FileStream(previewPath, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
-                    await previewFile.CopyToAsync(ps);
+                    await previewFile.CopyToAsync(ps); // 将上传的预览图文件内容复制到服务器上的新文件中
                 }
                 _logger.LogInformation($"[Step-4] 预览图落盘成功: {previewPath}");
             }
 
             // 文件哈希与大小
             long fileSize = new FileInfo(dwgPath).Length;
-            string fileHash = await ComputeSha256Async(dwgPath);
-            _logger.LogInformation($"[Step-5] 文件指纹: {fileHash[..8]}...");
+            string fileHash = await ComputeSha256Async(dwgPath); // 计算文件的 SHA-256 哈希值，作为文件指纹
+            _logger.LogInformation($"[Step-5] 文件指纹: {fileHash[..8]}..."); // 记录哈希值的前8位作为简短指纹，方便日志查看
 
             // ============================
             // 5. 写入数据库
             // ============================
             try
             {
-                var dbType = GetDatabaseType();
+                var dbType = GetDatabaseType(); // 获取当前使用的数据库类型（DM 或 MySQL）
                 _logger.LogInformation($"[Step-6] 开始写库 - Type: {dbType}, CategoryId: {finalCategoryId}");
-
+                // 构造数据库写入请求对象，包含所有必要的信息
                 var req = new UploadDbRequest
                 {
                     CategoryId = finalCategoryId,
@@ -245,7 +251,7 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
                     CreatedBy = finalCreatedBy,
                     AttributesJson = finalAttributesJson
                 };
-
+                // 根据数据库类型调用不同的写库方法，保存上传记录到数据库，并获取生成的 StorageId 和 AttrId
                 UploadDbResult dbResult = dbType == "DM"
                     ? await SaveUploadToDmAsync(req)
                     : await SaveUploadToMySqlAsync(req);
@@ -741,7 +747,11 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
         #endregion
 
         #region 查询与路径解析（双库）
-
+        /// <summary>
+        /// 获取存储记录的核心方法，支持 DM 和 MySQL 两种数据库，根据配置动态选择查询逻辑，并映射到统一的 StorageRow 结果对象，简化后续处理逻辑。该方法会根据存储 ID 查询数据库获取文件记录的详细信息，包括文件名、存储路径、预览图信息等，为下载和预览接口提供数据支持。
+        /// </summary>
+        /// <param name="storageId"> 存储 ID </param>
+        /// <returns> 返回存储记录 </returns>
         private async Task<StorageRow?> GetStorageRowAsync(int storageId)
         {
             string dbType = GetDatabaseType(); // 获取数据库类型
@@ -790,7 +800,11 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
                 return await conn.QueryFirstOrDefaultAsync<StorageRow>(sql, new { Id = storageId });
             }
         }
-
+        /// <summary>
+        /// 解析物理路径
+        /// </summary>
+        /// <param name="row"> 存储记录 </param>
+        /// <returns> 返回物理路径 </returns>
         private string ResolvePhysicalPath(StorageRow row)
         {
             // 如果数据库中存储了绝对路径且文件存在，直接使用
@@ -808,7 +822,11 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
 
             return Path.Combine(root, row.CategoryType ?? "sub", row.CategoryId.ToString(), fileName);
         }
-
+        /// <summary>
+        /// 解析预览图路径，优先使用数据库中存储的绝对路径，如果不存在则尝试在主文件目录下根据预览图文件名查找，确保兼容不同的存储方式和配置，同时也提供了更灵活的路径解析逻辑，适应不同环境下的文件存储结构。
+        /// </summary>
+        /// <param name="row"> 存储记录 </param>
+        /// <returns> 返回预览图路径 </returns>
         private string ResolvePreviewPath(StorageRow row)
         {
             // 优先使用数据库中存储的预览图绝对路径
@@ -834,14 +852,22 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
         #endregion
 
         #region 通用工具
-
+        /// <summary>
+        /// 获取当前使用的数据库类型（DM 或 MySQL），默认 DM
+        /// </summary>
+        /// <returns></returns>
         private string GetDatabaseType()
         {
             // 从配置中读取数据库类型，默认为 DM
             string t = (_configuration["Database:Type"] ?? "DM").Trim().ToUpperInvariant();
             return t == "MYSQL" ? "MySQL" : "DM";
         }
-
+        /// <summary>
+        /// 获取当前使用的数据库连接字符串，优先读取通用配置 Database:ConnectionString，如果没有则根据数据库类型读取 ConnectionStrings:MySQL 或 ConnectionStrings:DM，确保兼容不同的配置方式
+        /// </summary>
+        /// <param name="dbType"> 数据库类型 </param>
+        /// <returns>返回连接字符串 </returns>
+        /// <exception cref="InvalidOperationException"></exception>
         private string GetActiveConnectionString(string dbType)
         {
             // 优先读取 Database:ConnectionString 通用配置
@@ -857,7 +883,11 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
 
             return conn;
         }
-
+        /// <summary>
+        /// 获取存储根路径，支持多种配置键名（Storage:Root 或 UploadStorage:RootPath），确保兼容不同的配置方式，如果都没有则抛出异常提示缺少配置，避免后续路径解析失败导致难以排查的问题
+        /// </summary>
+        /// <returns> 返回存储根路径 </returns>
+        /// <exception cref="InvalidOperationException"></exception>
         private string GetStorageRoot()
         {
             // 读取存储根路径配置，支持多种配置键名
@@ -868,7 +898,11 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
                 throw new InvalidOperationException("缺少存储根路径配置（Storage:Root / UploadStorage:RootPath）。");
             return root;
         }
-
+        /// <summary>
+        /// 解析属性
+        /// </summary>
+        /// <param name="json">JSON 字符串 </param>
+        /// <returns> 返回属性字典 </returns>
         private static Dictionary<string, string> ParseAttributes(string? json)
         {
             // 解析 JSON 字符串为字典，忽略大小写
@@ -886,7 +920,12 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
                 return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
         }
-
+        /// <summary>
+        /// 获取属性值，支持大小写不敏感的键名，如果属性不存在则返回 null，避免直接访问字典导致 KeyNotFoundException 的问题，同时也简化了调用代码的复杂度，使得属性访问更为安全和便捷
+        /// </summary>
+        /// <param name="attrs"> 属性字典 </param>
+        /// <param name="key"> 属性键名 </param>
+        /// <returns> 返回属性值 </returns>
         private static string? GetAttr(Dictionary<string, string> attrs, string key)
         {
             // 安全地从字典中获取属性值
@@ -894,7 +933,11 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             if (attrs.TryGetValue(key, out var value)) return value;
             return null;
         }
-
+        /// <summary>
+        /// 第一个非空
+        /// </summary>
+        /// <param name="values"> 字符串数组 </param>
+        /// <returns> 返回第一个非空且非空白字符串 </returns>
         private static string FirstNonEmpty(params string?[] values)
         {
             // 返回第一个非空且非空白字符串
@@ -905,7 +948,14 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             }
             return string.Empty;
         }
-
+        /// <summary>
+        /// 第一个有效整数
+        /// </summary>
+        /// <param name="v1"> 第一个字符串 </param>
+        /// <param name="v2"> 第二个字符串 </param>
+        /// <param name="v3"> 第三个字符串 </param>
+        /// <param name="fallback"> 默认值 </param>
+        /// <returns> 返回第一个有效的正整数 </returns>
         private static int FirstValidInt(string? v1, string? v2, string? v3, int fallback)
         {
             // 尝试解析多个字符串为整数，返回第一个有效的正整数，否则返回默认值
@@ -914,7 +964,14 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             if (int.TryParse((v3 ?? string.Empty).Trim(), out var i3) && i3 > 0) return i3;
             return fallback;
         }
-
+        /// <summary>
+        /// 第一个有效双精度浮点数
+        /// </summary>
+        /// <param name="v1"> 第一个字符串 </param>
+        /// <param name="v2"> 第二个字符串 </param>
+        /// <param name="v3"> 第三个字符串 </param>
+        /// <param name="fallback"> 默认值 </param>
+        /// <returns> 返回第一个有效的正双精度浮点数 </returns>
         private static double FirstValidDouble(string? v1, string? v2, string? v3, double fallback)
         {
             // 尝试解析多个字符串为双精度浮点数，返回第一个有效的正数，否则返回默认值
@@ -923,7 +980,11 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             if (double.TryParse((v3 ?? string.Empty).Trim(), out var d3) && d3 > 0) return d3;
             return fallback;
         }
-
+        /// <summary>
+        /// 计算文件的 SHA256 哈希值，返回十六进制字符串形式，确保文件内容的唯一性验证和完整性检查，同时也可以用于后续的重复文件检测和安全审计等功能，提供了一个可靠的方式来识别和管理上传的图元文件
+        /// </summary>
+        /// <param name="filePath"> 文件路径 </param>
+        /// <returns> 返回 SHA256 哈希值 </returns>
         private static async Task<string> ComputeSha256Async(string filePath)
         {
             // 计算文件的 SHA256 哈希值
@@ -932,7 +993,10 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             var hash = await sha.ComputeHashAsync(stream);
             return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
         }
-
+        /// <summary>
+        /// 尝试删除指定路径的文件，如果删除失败则捕获异常并记录日志，但不抛出异常，以避免影响主流程的执行，这在处理临时文件或清理旧文件时非常有用，可以确保即使删除操作失败也不会导致整个请求失败，同时也提供了日志记录以便后续排查和监控文件删除情况。
+        /// </summary>
+        /// <param name="path"> 文件路径 </param>
         private static void TryDeleteFile(string? path)
         {
             // 尝试删除文件，如果失败则忽略，避免影响主流程

@@ -23,7 +23,13 @@ namespace GB_NewCadPlus_IV.UploadApi.Filters
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
-
+        
+        /// <summary>
+        /// 异步执行操作
+        /// </summary>
+        /// <param name="context"></param>
+        /// <param name="next"></param>
+        /// <returns></returns>
         public async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
         {
             var sw = Stopwatch.StartNew();
