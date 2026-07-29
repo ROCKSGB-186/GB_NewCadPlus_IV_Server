@@ -281,6 +281,137 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             }
         }
 
+        /// <summary>
+        /// 替换图元主文件：PUT /api/graphics/{storageId}/file
+        /// 借鉴 ReplacePreviewCoreAsync 的设计思路
+        /// </summary>
+        [HttpPut("{storageId:int}/file")]
+        [RequestSizeLimit(1024L * 1024L * 1024L)] // 1GB 限制
+        public async Task<IActionResult> ReplaceGraphicFileAsync([FromRoute] int storageId)
+        {
+            try
+            {
+                // ========== 1. 检查记录是否存在（与 ReplacePreviewCoreAsync 一致） ==========
+                var row = await GetStorageRowAsync(storageId);
+                if (row == null)
+                    return NotFound(new { success = false, message = "图元记录不存在。" });
+
+                // ========== 2. 提取上传的新 DWG 文件（类似提取 previewFile） ==========
+                IFormFile? dwgFile = Request.Form.Files.GetFile("dwgFile");
+                if (dwgFile == null || dwgFile.Length == 0)
+                    return BadRequest(new { success = false, message = "dwgFile 不能为空。" });
+
+                // ========== 3. 确定存储目录（沿用旧记录的路径目录，保持结构不变） ==========
+                string oldPhysicalPath = ResolvePhysicalPath(row);
+                string? directory = Path.GetDirectoryName(oldPhysicalPath);
+                if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+                    return StatusCode(500, new { success = false, message = "原始存储目录不可用。" });
+
+                // ========== 4. （可选）备份旧文件，然后删除或保留 ==========
+                if (System.IO.File.Exists(oldPhysicalPath))
+                {
+                    try
+                    {
+                        // 备份为 .bak 文件（可直接覆盖旧的 .bak）
+                        System.IO.File.Copy(oldPhysicalPath, oldPhysicalPath + ".bak", true);
+                    }
+                    catch
+                    {
+                        // 备份失败不中断主流程，记录日志即可
+                        _logger.LogWarning($"备份旧文件失败: {oldPhysicalPath}");
+                    }
+                    // 删除旧文件（也可以保留，但推荐删除以释放空间）
+                    try { System.IO.File.Delete(oldPhysicalPath); } catch { }
+                }
+
+                // ========== 5. 保存新文件（生成唯一文件名，避免缓存问题） ==========
+                string ext = Path.GetExtension(dwgFile.FileName);
+                if (string.IsNullOrWhiteSpace(ext)) ext = ".dwg";
+                string newStoredName = Guid.NewGuid().ToString() + ext;
+                string newPath = Path.Combine(directory, newStoredName);
+
+                await using (var fs = new FileStream(newPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    await dwgFile.CopyToAsync(fs);
+                }
+                _logger.LogInformation($"新 DWG 文件已保存: {newPath}");
+
+                // ========== 6. 计算新文件的哈希与大小 ==========
+                long fileSize = new FileInfo(newPath).Length;
+                string fileHash = await ComputeSha256Async(newPath);
+                _logger.LogInformation($"新文件哈希: {fileHash[..8]}... Size: {fileSize}");
+
+                // ========== 7. 更新数据库记录（借鉴 ReplacePreviewCoreAsync 的 SQL 结构） ==========
+                var dbType = GetDatabaseType();
+                string updateSql = dbType == "DM"
+                    ? $@"UPDATE {_configuration["Database:Schema"] ?? "CAD_SW_LIBRARY"}.CAD_FILE_STORAGE 
+                 SET file_name = :FileName, 
+                     file_stored_name = :StoredName, 
+                     file_path = :FilePath, 
+                     file_hash = :FileHash, 
+                     file_size = :FileSize, 
+                     updated_at = :Now 
+                 WHERE id = :Id"
+                    : @"UPDATE cad_file_storage 
+               SET file_name = @FileName, 
+                   file_stored_name = @StoredName, 
+                   file_path = @FilePath, 
+                   file_hash = @FileHash, 
+                   file_size = @FileSize, 
+                   updated_at = NOW() 
+               WHERE id = @Id";
+
+                using var conn = dbType == "DM" ? (DbConnection)new DmConnection(GetActiveConnectionString("DM"))
+                                                 : new MySqlConnection(GetActiveConnectionString("MySQL"));
+                await conn.OpenAsync();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = updateSql;
+
+                // 辅助方法：添加参数
+                void AddParam(string name, object value)
+                {
+                    var p = cmd.CreateParameter();
+                    p.ParameterName = name;
+                    p.Value = value;
+                    cmd.Parameters.Add(p);
+                }
+
+                AddParam(dbType == "DM" ? ":FileName" : "@FileName", dwgFile.FileName);
+                AddParam(dbType == "DM" ? ":StoredName" : "@StoredName", newStoredName);
+                AddParam(dbType == "DM" ? ":FilePath" : "@FilePath", newPath);
+                AddParam(dbType == "DM" ? ":FileHash" : "@FileHash", fileHash);
+                AddParam(dbType == "DM" ? ":FileSize" : "@FileSize", fileSize);
+                AddParam(dbType == "DM" ? ":Id" : "@Id", storageId);
+                if (dbType == "DM") AddParam(":Now", DateTime.Now);
+
+                int affectedRows = await cmd.ExecuteNonQueryAsync();
+                if (affectedRows == 0)
+                {
+                    // 理论上不应该发生，但做个保护
+                    _logger.LogError($"数据库更新失败：未找到 storageId={storageId} 的记录");
+                    return StatusCode(500, new { success = false, message = "更新数据库记录失败。" });
+                }
+
+                _logger.LogInformation($"主文件已替换成功：storageId={storageId}, newPath={newPath}");
+
+                // ========== 8. 返回成功结果（格式与 ReplacePreviewCoreAsync 相似） ==========
+                return Ok(new
+                {
+                    success = true,
+                    message = "主文件替换成功",
+                    filePath = newPath,
+                    fileStoredName = newStoredName,
+                    fileHash,
+                    fileSize
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "替换主文件失败");
+                return StatusCode(500, new { success = false, message = "服务器内部错误: " + ex.Message });
+            }
+        }
+
 
         /// <summary>
         /// 替换预览图的核心业务逻辑（供 UploadAsync 和 ReplacePreviewAsync 共用）
@@ -349,7 +480,7 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
                 pId.Value = storageId;
                 cmd.Parameters.Add(pId);
 
-                await cmd.ExecuteNonQueryAsync();
+                await cmd.ExecuteNonQueryAsync(); // 执行更新
 
                 _logger.LogInformation($"预览图已替换：storageId={storageId}, newPath={newPath}");
                 return Ok(new { success = true, message = "预览图替换成功", previewImagePath = newPath });
@@ -361,6 +492,11 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             }
         }
 
+        /// <summary>
+        /// 替换预览图
+        /// </summary>
+        /// <param name="storageId"></param>
+        /// <returns></returns>
         [HttpPut("{storageId}/preview")]
         [RequestSizeLimit(10L * 1024L * 1024L)]
         public async Task<IActionResult> ReplacePreviewAsync([FromRoute] int storageId)
@@ -980,6 +1116,7 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             if (double.TryParse((v3 ?? string.Empty).Trim(), out var d3) && d3 > 0) return d3;
             return fallback;
         }
+
         /// <summary>
         /// 计算文件的 SHA256 哈希值，返回十六进制字符串形式，确保文件内容的唯一性验证和完整性检查，同时也可以用于后续的重复文件检测和安全审计等功能，提供了一个可靠的方式来识别和管理上传的图元文件
         /// </summary>
@@ -993,6 +1130,7 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             var hash = await sha.ComputeHashAsync(stream);
             return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
         }
+
         /// <summary>
         /// 尝试删除指定路径的文件，如果删除失败则捕获异常并记录日志，但不抛出异常，以避免影响主流程的执行，这在处理临时文件或清理旧文件时非常有用，可以确保即使删除操作失败也不会导致整个请求失败，同时也提供了日志记录以便后续排查和监控文件删除情况。
         /// </summary>
@@ -1007,7 +1145,6 @@ namespace GB_NewCadPlus_IV.UploadApi.Controllers
             }
             catch { }
         }
-
         /// <summary>
         /// 获取内容类型
         /// </summary>
