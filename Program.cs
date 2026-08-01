@@ -15,6 +15,12 @@ builder.Services.AddControllers();
 // 从命名看，它应该是一个使用达梦数据库实现的上传写库服务，用于处理图形数据持久化。
 builder.Services.AddScoped<GraphicUploadDmService>();
 
+// 注册分类查询服务：分类数据库访问只允许发生在服务器端，客户端通过 HTTP 接口读取分类数据。
+builder.Services.AddScoped<CategoryQueryService>();
+
+// 注册分类写入服务：主分类新增操作只允许由服务器访问数据库。
+builder.Services.AddScoped<CategoryCommandService>();
+
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 
 //AddEndpointsApiExplorer() + AddSwaggerGen()：启用 Swagger / OpenAPI 文档生成，方便测试和查看接口。

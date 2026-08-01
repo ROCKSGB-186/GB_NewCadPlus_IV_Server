@@ -2,6 +2,7 @@
 using GB_NewCadPlus_IV_Server.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.AspNetCore.Mvc;
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -43,7 +44,7 @@ namespace GB_NewCadPlus_IV.UploadApi.Filters
 
             // 2. 获取关键请求参数摘要（避免日志过大，只取前 500 字符）
             string? bodySummary = null;
-            if (request.ContentLength > 0 && (method == "POST" || method == "PUT"))
+            if ((request.ContentLength ?? 0) > 0 && (method == "POST" || method == "PUT"))
             {
                 try
                 {
@@ -105,7 +106,12 @@ namespace GB_NewCadPlus_IV.UploadApi.Filters
             }
             else if (resultContext != null)
             {
-                int statusCode = resultContext.HttpContext.Response.StatusCode;
+                // ActionFilter 执行结束时，ObjectResult 可能还没有经过响应执行器写入 Response.StatusCode。
+                // 因此优先读取控制器返回的 StatusCodeObjectResult，避免把 HTTP 500 误记为 HTTP 200。
+                int statusCode = resultContext.Result is ObjectResult objectResult
+                    && objectResult.StatusCode.HasValue
+                    ? objectResult.StatusCode.Value
+                    : resultContext.HttpContext.Response.StatusCode;
 
                 if (statusCode >= 200 && statusCode < 300)
                 {
