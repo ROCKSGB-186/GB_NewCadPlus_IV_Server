@@ -597,6 +597,14 @@ public sealed class CategoryCommandService
                 throw new KeyNotFoundException("主分类删除失败，目标记录不存在。");
             }
 
+            // 分类删除后同步处理关联部门：无人员的部门删除，有人员的部门停用但保留历史数据。
+            await connection.ExecuteAsync(new CommandDefinition(
+                "UPDATE departments SET is_active = 0 WHERE cad_category_id = @Id AND EXISTS (SELECT 1 FROM users WHERE users.department_id = departments.id)",
+                new { Id = categoryId }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            await connection.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM departments WHERE cad_category_id = @Id AND NOT EXISTS (SELECT 1 FROM users WHERE users.department_id = departments.id)",
+                new { Id = categoryId }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return CreateCategoryDeleteResponse(categoryId);
         }
@@ -655,6 +663,14 @@ public sealed class CategoryCommandService
             {
                 throw new KeyNotFoundException("主分类删除失败，目标记录不存在。");
             }
+
+            // 分类删除后同步处理关联部门：无人员的部门删除，有人员的部门停用但保留历史数据。
+            await connection.ExecuteAsync(new CommandDefinition(
+                $"UPDATE {schema}.DEPARTMENTS SET IS_ACTIVE = 0 WHERE CAD_CATEGORY_ID = :Id AND EXISTS (SELECT 1 FROM {schema}.USERS WHERE {schema}.USERS.DEPARTMENT_ID = {schema}.DEPARTMENTS.ID)",
+                new { Id = categoryId }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            await connection.ExecuteAsync(new CommandDefinition(
+                $"DELETE FROM {schema}.DEPARTMENTS WHERE CAD_CATEGORY_ID = :Id AND NOT EXISTS (SELECT 1 FROM {schema}.USERS WHERE {schema}.USERS.DEPARTMENT_ID = {schema}.DEPARTMENTS.ID)",
+                new { Id = categoryId }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return CreateCategoryDeleteResponse(categoryId);

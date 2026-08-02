@@ -21,6 +21,15 @@ builder.Services.AddScoped<CategoryQueryService>();
 // 注册分类写入服务：主分类新增操作只允许由服务器访问数据库。
 builder.Services.AddScoped<CategoryCommandService>();
 
+// 部门查询服务：客户端通过 HTTP 获取部门列表，数据库只由服务器访问。
+builder.Services.AddScoped<DepartmentQueryService>();
+
+// 用户认证、注册及用户/部门写操作统一在服务器执行。
+builder.Services.AddScoped<AuthUserDepartmentService>();
+
+// 图形文件查询服务：文件元数据统一由服务器读取。
+builder.Services.AddScoped<GraphicQueryService>();
+
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 
 //AddEndpointsApiExplorer() + AddSwaggerGen()：启用 Swagger / OpenAPI 文档生成，方便测试和查看接口。
@@ -56,7 +65,12 @@ if (app.Environment.IsDevelopment())
 } // 仅在开发环境启用 Swagger 页面和 JSON 端点，生产环境自动关闭。
 
 // 7. 标准 HTTP 中间件配置：
-app.UseHttpsRedirection(); // 强制重定向到 HTTPS
+// 当前客户端默认通过 HTTP 访问 API；仅在明确配置时启用 HTTPS 重定向，
+// 避免 HTTP 部署环境把请求重定向到不存在的 HTTPS 端口。
+if (builder.Configuration.GetValue<bool>("Server:UseHttpsRedirection"))
+{
+    app.UseHttpsRedirection();
+}
 
 app.UseAuthorization();    // 启用授权中间件（若需要身份验证）
 
