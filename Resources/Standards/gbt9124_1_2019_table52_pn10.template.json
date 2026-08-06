@@ -1,0 +1,33 @@
+{
+  "familyCode": "FLANGE",
+  "familyName": "法兰",
+  "seriesCode": "PLATE_WELD",
+  "seriesName": "板式平焊钢制管法兰",
+  "standardNumber": "GB/T 9124.1-2019",
+  "tableNumber": "表52",
+  "pressureRating": "PN10",
+  "flangeType": "PL",
+  "faceType": "RF",
+  "records": [
+    {
+      "sourceRowNumber": 2,
+      "dn": "DN50",
+      "dnValue": 50,
+      "pn": "PN10",
+      "pipeOuterDiameterSeriesI": 60.3,
+      "pipeOuterDiameterSeriesII": 57,
+      "flangeOuterDiameter": 165,
+      "boltCircleDiameter": 125,
+      "boltHoleDiameter": 18,
+      "boltCount": 4,
+      "boltSpecification": "M16",
+      "boltRawSuffix": null,
+      "flangeThickness": 20,
+      "raisedFaceHeight": 3,
+      "flangeInnerDiameterSeriesI": 61.5,
+      "flangeInnerDiameterSeriesII": 59,
+      "rawValues": {},
+      "warnings": []
+    }
+  ]
+}

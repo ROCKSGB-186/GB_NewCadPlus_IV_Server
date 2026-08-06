@@ -4,24 +4,32 @@
     <TargetFramework>net8.0</TargetFramework>
     <!-- 目标框架 -->
     <Nullable>enable</Nullable>
+    <AcceptNPOIOSMFLicense>true</AcceptNPOIOSMFLicense>
     <!-- 启用 Nullable 引用类型检查 -->
     <ImplicitUsings>enable</ImplicitUsings>
     <!-- 启用隐式 using -->
     <Version>1.0.1</Version>
     <!-- 程序集语义版本号（可根据发布流程变更） -->
-    <AssemblyVersion>3.26.0803.136</AssemblyVersion>
+    <AssemblyVersion>3.26.0805.137</AssemblyVersion>
     <!-- 程序集版本（建议随重大变更更新） -->
-    <FileVersion>3.26.0803.136</FileVersion>
+    <FileVersion>3.26.0805.137</FileVersion>
     <!-- 文件版本（便于发布包/部署查看） -->
-    <InformationalVersion>3.26.0803.136</InformationalVersion>
+    <InformationalVersion>3.26.0805.137</InformationalVersion>
     <OutputType>Exe</OutputType>
     <!-- 可包含 Git SHA 或语义版本扩展 -->
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="web.config">
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Dapper" Version="2.1.66" />
     <PackageReference Include="DM.DmProvider" Version="8.3.1.47463" />
     <PackageReference Include="MySql.Data" Version="9.7.0" />
+    <PackageReference Include="NPOI" Version="2.8.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
 

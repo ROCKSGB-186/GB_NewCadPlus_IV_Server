@@ -30,6 +30,12 @@ builder.Services.AddScoped<AuthUserDepartmentService>();
 // 图形文件查询服务：文件元数据统一由服务器读取。
 builder.Services.AddScoped<GraphicQueryService>();
 
+// 注册规范查询服务；规范数据库仍由服务器统一访问，客户端只通过 HTTP 查询。
+builder.Services.AddScoped<StandardQueryService>();
+
+// 导入预览批次需要在预览和确认请求之间短暂保留，因此使用单例内存缓存。
+builder.Services.AddSingleton<StandardImportService>();
+
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 
 //AddEndpointsApiExplorer() + AddSwaggerGen()：启用 Swagger / OpenAPI 文档生成，方便测试和查看接口。
