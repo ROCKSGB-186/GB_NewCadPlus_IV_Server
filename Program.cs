@@ -33,6 +33,15 @@ builder.Services.AddScoped<GraphicQueryService>();
 // 注册规范查询服务；规范数据库仍由服务器统一访问，客户端只通过 HTTP 查询。
 builder.Services.AddScoped<StandardQueryService>();
 
+// 注册规范资料管理查询服务，目录和版本元数据统一由服务器读取。
+builder.Services.AddScoped<StandardManagementQueryService>();
+
+// 注册规范管理写入服务，统一处理版本、附件和状态变更。
+builder.Services.AddScoped<StandardManagementCommandService>();
+
+// 注册规范附件存储，数据库仅保存文件元数据和相对路径。
+builder.Services.AddSingleton<IStandardFileStorage, LocalStandardFileStorage>();
+
 // 导入预览批次需要在预览和确认请求之间短暂保留，因此使用单例内存缓存。
 builder.Services.AddSingleton<StandardImportService>();
 
