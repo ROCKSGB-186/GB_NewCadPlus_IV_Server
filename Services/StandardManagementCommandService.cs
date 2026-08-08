@@ -117,6 +117,67 @@ public sealed class StandardManagementCommandService
         }
     }
 
+    /// <summary>
+    /// 在同一个父分类下调整规范分类顺序。
+    /// </summary>
+    public async Task ReorderCategoryAsync(
+        long categoryId,
+        int direction,
+        string operatorName,
+        CancellationToken cancellationToken = default)
+    {
+        if (categoryId <= 0) throw new ArgumentException("分类 ID 必须大于 0。", nameof(categoryId));
+        if (direction != -1 && direction != 1) throw new ArgumentException("排序方向必须是 -1 或 1。", nameof(direction));
+        if (string.IsNullOrWhiteSpace(operatorName)) throw new ArgumentException("操作用户名不能为空。", nameof(operatorName));
+
+        string databaseType = GetDatabaseType();
+        string schema = GetSchemaName();
+        string table = databaseType == "DM" ? $"{schema}.STANDARD_CATEGORIES" : "standard_categories";
+        string p = databaseType == "DM" ? ":" : "@";
+
+        await using DbConnection connection = await OpenConnectionAsync(databaseType, cancellationToken).ConfigureAwait(false);
+        await using DbTransaction transaction = connection.BeginTransaction();
+        try
+        {
+            long? parentId = await connection.ExecuteScalarAsync<long?>(new CommandDefinition(
+                $"SELECT PARENT_ID FROM {table} WHERE ID={p}Id AND IS_ACTIVE=1",
+                new { Id = categoryId }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            List<CategoryOrderRow> siblings = (await connection.QueryAsync<CategoryOrderRow>(new CommandDefinition(
+                $"SELECT ID AS Id,PARENT_ID AS ParentId,SORT_ORDER AS SortOrder FROM {table} WHERE IS_ACTIVE=1 AND ((PARENT_ID IS NULL AND {p}ParentId IS NULL) OR PARENT_ID={p}ParentId) ORDER BY SORT_ORDER,ID",
+                new { ParentId = parentId }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false)).ToList();
+
+            int currentIndex = siblings.FindIndex(item => item.Id == categoryId);
+            int targetIndex = currentIndex + direction;
+            if (currentIndex < 0) throw new KeyNotFoundException("规范分类不存在或已停用。");
+            if (targetIndex < 0 || targetIndex >= siblings.Count)
+                throw new InvalidOperationException(direction < 0 ? "当前规范库已经在最上面。" : "当前规范库已经在最下面。");
+
+            (siblings[currentIndex], siblings[targetIndex]) = (siblings[targetIndex], siblings[currentIndex]);
+            for (int index = 0; index < siblings.Count; index++)
+            {
+                await connection.ExecuteAsync(new CommandDefinition(
+                    $"UPDATE {table} SET SORT_ORDER={p}SortOrder,UPDATED_AT=CURRENT_TIMESTAMP WHERE ID={p}Id AND IS_ACTIVE=1",
+                    new { Id = siblings[index].Id, SortOrder = (index + 1) * 10 },
+                    transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            }
+
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("规范分类排序成功：CategoryId={CategoryId}, Direction={Direction}, Operator={OperatorName}", categoryId, direction, operatorName);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private sealed class CategoryOrderRow
+    {
+        public long Id { get; init; }
+        public long? ParentId { get; init; }
+        public int SortOrder { get; init; }
+    }
+
     private sealed class CategoryHierarchyRow
     {
         public long Id { get; init; }

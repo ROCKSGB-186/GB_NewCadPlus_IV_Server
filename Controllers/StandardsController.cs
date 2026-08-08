@@ -78,6 +78,29 @@ public sealed class StandardsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(new { success = false, message = ex.Message }); }
     }
 
+    /// <summary>
+    /// 调整规范主分类或子分类在同层级中的显示顺序。
+    /// </summary>
+    [HttpPost("management/categories/{categoryId:long}/reorder")]
+    public async Task<ActionResult<StandardManagementOperationResponse>> ReorderManagementCategoryAsync(
+        long categoryId,
+        [FromBody] StandardCategoryReorderRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!StandardManagementAuthorization.IsAdministrator(Request, out string operatorName))
+            return StatusCode(StatusCodes.Status403Forbidden, new { success = false, message = "只有 sa、SYSDBA、admin 可以管理规范库。" });
+
+        try
+        {
+            await _standardManagementCommandService.ReorderCategoryAsync(
+                categoryId, request?.Direction ?? 0, operatorName, cancellationToken).ConfigureAwait(false);
+            return Ok(new StandardManagementOperationResponse { Success = true, Message = "规范库显示顺序调整成功。", Id = categoryId });
+        }
+        catch (ArgumentException ex) { return BadRequest(new { success = false, message = ex.Message }); }
+        catch (KeyNotFoundException ex) { return NotFound(new { success = false, message = ex.Message }); }
+        catch (InvalidOperationException ex) { return Conflict(new { success = false, message = ex.Message }); }
+    }
+
     [HttpPost("management/categories")]
     public async Task<ActionResult<StandardManagementOperationResponse>> CreateManagementCategoryAsync(
         [FromBody] StandardCategoryCommandRequest request,

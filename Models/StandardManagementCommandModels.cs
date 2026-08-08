@@ -29,6 +29,15 @@ public sealed class StandardCategoryMoveRequest
 }
 
 /// <summary>
+/// 调整规范分类显示顺序的请求参数。
+/// Direction=-1 表示上移，Direction=1 表示下移。
+/// </summary>
+public sealed class StandardCategoryReorderRequest
+{
+    public int Direction { get; init; }
+}
+
+/// <summary>
 /// 移动旧规范系列时提交的目标分类。
 /// </summary>
 public sealed class StandardSeriesMoveRequest
