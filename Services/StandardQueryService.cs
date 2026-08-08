@@ -2,6 +2,7 @@ using Dapper;
 using Dm;
 using GB_NewCadPlus_IV.UploadApi.Models;
 using MySql.Data.MySqlClient;
+using System.Data.Common;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
@@ -142,6 +143,65 @@ public sealed class StandardQueryService
                 databaseType);
             throw;
         }
+    }
+
+    /// <summary>
+    /// 查询指定规范系列下的全部有效法兰规范内容。
+    /// </summary>
+    public async Task<IReadOnlyList<FlangeStandardRecordDto>> GetFlangeRecordsAsync(
+        long seriesId,
+        CancellationToken cancellationToken = default)
+    {
+        if (seriesId <= 0)
+            throw new ArgumentException("规范系列 ID 必须大于 0。", nameof(seriesId));
+
+        string databaseType = GetDatabaseType();
+        string schema = GetSchemaName();
+        string table = databaseType == "DM"
+            ? $"{schema}.STANDARD_FLANGE_RECORDS"
+            : "standard_flange_records";
+        string parameter = databaseType == "DM" ? ":" : "@";
+        string sql = $"""
+            SELECT
+                SERIES_ID AS SeriesId,
+                ID AS RecordId,
+                SOURCE_ROW_NUMBER AS SourceRowNumber,
+                DN AS DN,
+                DN_VALUE AS DNValue,
+                PN AS PN,
+                PIPE_OUTER_DIAMETER_I AS PipeOuterDiameterSeriesI,
+                PIPE_OUTER_DIAMETER_II AS PipeOuterDiameterSeriesII,
+                FLANGE_OUTER_DIAMETER AS FlangeOuterDiameter,
+                BOLT_CIRCLE_DIAMETER AS BoltCircleDiameter,
+                BOLT_HOLE_DIAMETER AS BoltHoleDiameter,
+                BOLT_COUNT AS BoltCount,
+                BOLT_SPECIFICATION AS BoltSpecification,
+                BOLT_RAW_SUFFIX AS BoltRawSuffix,
+                FLANGE_THICKNESS AS FlangeThickness,
+                RAISED_FACE_HEIGHT AS RaisedFaceHeight,
+                FLANGE_INNER_DIAMETER_I AS FlangeInnerDiameterSeriesI,
+                FLANGE_INNER_DIAMETER_II AS FlangeInnerDiameterSeriesII,
+                RAW_VALUES_JSON AS RawValuesJson,
+                WARNINGS_JSON AS WarningsJson
+            FROM {table}
+            WHERE SERIES_ID={parameter}SeriesId AND IS_ACTIVE=1
+            ORDER BY DN_VALUE, ID
+            """;
+
+        await using DbConnection connection = databaseType == "DM"
+            ? new DmConnection(GetConnectionString("DM"))
+            : new MySqlConnection(GetConnectionString("MYSQL"));
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        List<StandardMatchRow> rows = (await connection.QueryAsync<StandardMatchRow>(
+            new CommandDefinition(sql, new { SeriesId = seriesId }, cancellationToken: cancellationToken))
+            .ConfigureAwait(false)).AsList();
+
+        _logger.LogInformation(
+            "规范内容查询完成：SeriesId={SeriesId}, RecordCount={RecordCount}, DatabaseType={DatabaseType}",
+            seriesId, rows.Count, databaseType);
+
+        return rows.Select(row => ToMatchData(row).Record).ToList();
     }
 
     private async Task<StandardMatchData?> QueryMySqlAsync(

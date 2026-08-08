@@ -310,6 +310,30 @@ public sealed class StandardsController : ControllerBase
     }
 
     /// <summary>
+    /// 查询指定规范系列下的全部实际法兰规范记录。
+    /// 请求：GET /api/standards/flanges/series/{seriesId}/records
+    /// </summary>
+    [HttpGet("flanges/series/{seriesId:long}/records")]
+    [ProducesResponseType(typeof(IReadOnlyList<FlangeStandardRecordDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<IReadOnlyList<FlangeStandardRecordDto>>> GetFlangeRecordsAsync(
+        long seriesId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            IReadOnlyList<FlangeStandardRecordDto> records = await _standardQueryService
+                .GetFlangeRecordsAsync(seriesId, cancellationToken)
+                .ConfigureAwait(false);
+            return Ok(records);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { success = false, message = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// 按专业/类别、标准号、系列编码或关键词分页查询规范系列。
     /// 请求：GET /api/standards/management/search?keyword=法兰&page=1&pageSize=50
     /// </summary>
