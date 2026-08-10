@@ -33,6 +33,12 @@ builder.Services.AddScoped<GraphicQueryService>();
 // 注册规范查询服务；规范数据库仍由服务器统一访问，客户端只通过 HTTP 查询。
 builder.Services.AddScoped<StandardQueryService>();
 
+// 注册管道通用字段目录服务；第一阶段提供字段定义、默认值和进口/出口图面样式。
+builder.Services.AddScoped<PipelineCatalogService>();
+
+// 注册管道 GB 设计规范匹配服务；当前从 PipelineStandards:Records 配置读取真实记录。
+builder.Services.AddScoped<PipelineDesignStandardService>();
+
 // 注册规范资料管理查询服务，目录和版本元数据统一由服务器读取。
 builder.Services.AddScoped<StandardManagementQueryService>();
 
