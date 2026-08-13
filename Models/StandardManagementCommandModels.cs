@@ -46,6 +46,14 @@ public sealed class StandardSeriesMoveRequest
 }
 
 /// <summary>
+/// 修改规范系列显示名称的请求参数。
+/// </summary>
+public sealed class StandardSeriesRenameRequest
+{
+    public string Name { get; init; } = string.Empty;
+}
+
+/// <summary>
 /// 与当前提交的名称或编码重复的分类信息。
 /// </summary>
 public sealed class StandardCategoryDuplicateDto

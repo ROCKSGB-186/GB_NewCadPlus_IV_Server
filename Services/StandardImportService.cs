@@ -480,8 +480,13 @@ public sealed class StandardImportService
         const string select = "SELECT id FROM standard_series WHERE family_id=@FamilyId AND series_code=@SeriesCode AND standard_number=@StandardNumber AND table_number=@TableNumber AND pressure_rating=@PressureRating";
         object args = new { FamilyId = familyId, SeriesCode = series.SeriesCode, StandardNumber = series.StandardNumber, TableNumber = series.TableNumber, PressureRating = series.PressureRating };
         long? existing = await connection.ExecuteScalarAsync<long?>(new CommandDefinition(select, args, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
-        if (existing.HasValue) return existing.Value;
-        await connection.ExecuteAsync(new CommandDefinition("INSERT INTO standard_series(family_id,series_code,series_name,standard_number,table_number,pressure_rating,flange_type,face_type,is_active,created_at,updated_at) VALUES(@FamilyId,@SeriesCode,@SeriesName,@StandardNumber,@TableNumber,@PressureRating,@FlangeType,@FaceType,1,NOW(),NOW())", new { FamilyId = familyId, series.SeriesCode, series.SeriesName, series.StandardNumber, series.TableNumber, series.PressureRating, series.FlangeType, series.FaceType }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        if (existing.HasValue)
+        {
+            if (series.CategoryId.HasValue)
+                await connection.ExecuteAsync(new CommandDefinition("UPDATE standard_series SET category_id=@CategoryId,updated_at=NOW() WHERE id=@Id AND is_active=1", new { Id = existing.Value, CategoryId = series.CategoryId.Value }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            return existing.Value;
+        }
+        await connection.ExecuteAsync(new CommandDefinition("INSERT INTO standard_series(family_id,category_id,series_code,series_name,standard_number,table_number,pressure_rating,flange_type,face_type,is_active,created_at,updated_at) VALUES(@FamilyId,@CategoryId,@SeriesCode,@SeriesName,@StandardNumber,@TableNumber,@PressureRating,@FlangeType,@FaceType,1,NOW(),NOW())", new { FamilyId = familyId, CategoryId = series.CategoryId, series.SeriesCode, series.SeriesName, series.StandardNumber, series.TableNumber, series.PressureRating, series.FlangeType, series.FaceType }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
         return await connection.ExecuteScalarAsync<long>(new CommandDefinition(select, args, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
     }
 
@@ -506,9 +511,14 @@ public sealed class StandardImportService
     {
         const string condition = "FAMILY_ID=:FamilyId AND SERIES_CODE=:SeriesCode AND STANDARD_NUMBER=:StandardNumber AND TABLE_NUMBER=:TableNumber AND PRESSURE_RATING=:PressureRating";
         long? existing = await connection.ExecuteScalarAsync<long?>(new CommandDefinition($"SELECT ID FROM {schema}.STANDARD_SERIES WHERE {condition}", new { FamilyId = familyId, SeriesCode = series.SeriesCode, StandardNumber = series.StandardNumber, TableNumber = series.TableNumber, PressureRating = series.PressureRating }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
-        if (existing.HasValue) return existing.Value;
+        if (existing.HasValue)
+        {
+            if (series.CategoryId.HasValue)
+                await connection.ExecuteAsync(new CommandDefinition($"UPDATE {schema}.STANDARD_SERIES SET CATEGORY_ID=:CategoryId,UPDATED_AT=CURRENT_TIMESTAMP WHERE ID=:Id AND IS_ACTIVE=1", new { Id = existing.Value, CategoryId = series.CategoryId.Value }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
+            return existing.Value;
+        }
         long id = await NextDmIdAsync(connection, transaction, $"{schema}.STANDARD_SERIES", cancellationToken).ConfigureAwait(false);
-        await connection.ExecuteAsync(new CommandDefinition($"INSERT INTO {schema}.STANDARD_SERIES(ID,FAMILY_ID,SERIES_CODE,SERIES_NAME,STANDARD_NUMBER,TABLE_NUMBER,PRESSURE_RATING,FLANGE_TYPE,FACE_TYPE,IS_ACTIVE,CREATED_AT,UPDATED_AT) VALUES(:Id,:FamilyId,:SeriesCode,:SeriesName,:StandardNumber,:TableNumber,:PressureRating,:FlangeType,:FaceType,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", new { Id = id, FamilyId = familyId, series.SeriesCode, series.SeriesName, series.StandardNumber, series.TableNumber, series.PressureRating, series.FlangeType, series.FaceType }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        await connection.ExecuteAsync(new CommandDefinition($"INSERT INTO {schema}.STANDARD_SERIES(ID,FAMILY_ID,CATEGORY_ID,SERIES_CODE,SERIES_NAME,STANDARD_NUMBER,TABLE_NUMBER,PRESSURE_RATING,FLANGE_TYPE,FACE_TYPE,IS_ACTIVE,CREATED_AT,UPDATED_AT) VALUES(:Id,:FamilyId,:CategoryId,:SeriesCode,:SeriesName,:StandardNumber,:TableNumber,:PressureRating,:FlangeType,:FaceType,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", new { Id = id, FamilyId = familyId, CategoryId = series.CategoryId, series.SeriesCode, series.SeriesName, series.StandardNumber, series.TableNumber, series.PressureRating, series.FlangeType, series.FaceType }, transaction, cancellationToken: cancellationToken)).ConfigureAwait(false);
         return id;
     }
 

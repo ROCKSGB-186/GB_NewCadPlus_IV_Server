@@ -1,0 +1,69 @@
+{
+  "templateCode": "PIPE_GENERAL_V1",
+  "templateName": "通用管子规范模板",
+  "familyCode": "PIPE",
+  "fileType": "XLSX",
+  "version": 1,
+  "columns": [
+    {
+      "fieldCode": "DN",
+      "fieldName": "公称尺寸",
+      "dataType": "TEXT",
+      "isRequired": true,
+      "headerAliases": ["DN", "公称直径", "公称尺寸"]
+    },
+    {
+      "fieldCode": "PN",
+      "fieldName": "压力等级",
+      "dataType": "TEXT",
+      "isRequired": false,
+      "headerAliases": ["PN", "压力等级"]
+    },
+    {
+      "fieldCode": "OuterDiameter",
+      "fieldName": "外径",
+      "dataType": "DECIMAL",
+      "unit": "mm",
+      "isRequired": true,
+      "headerAliases": ["OuterDiameter", "外径", "D"]
+    },
+    {
+      "fieldCode": "WallThickness",
+      "fieldName": "壁厚",
+      "dataType": "DECIMAL",
+      "unit": "mm",
+      "isRequired": true,
+      "headerAliases": ["WallThickness", "壁厚", "δ"]
+    },
+    {
+      "fieldCode": "Schedule",
+      "fieldName": "壁厚等级",
+      "dataType": "TEXT",
+      "isRequired": false,
+      "headerAliases": ["Schedule", "壁厚等级", "管系列"]
+    },
+    {
+      "fieldCode": "Material",
+      "fieldName": "材质",
+      "dataType": "TEXT",
+      "isRequired": false,
+      "headerAliases": ["Material", "材质", "材料"]
+    },
+    {
+      "fieldCode": "UnitWeight",
+      "fieldName": "理论重量",
+      "dataType": "DECIMAL",
+      "unit": "kg/m",
+      "isRequired": false,
+      "headerAliases": ["UnitWeight", "理论重量", "单位重量"]
+    },
+    {
+      "fieldCode": "StandardLength",
+      "fieldName": "标准长度",
+      "dataType": "DECIMAL",
+      "unit": "mm",
+      "isRequired": false,
+      "headerAliases": ["StandardLength", "标准长度", "定尺长度"]
+    }
+  ]
+}

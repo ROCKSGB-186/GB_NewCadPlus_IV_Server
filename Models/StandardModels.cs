@@ -8,6 +8,9 @@ public sealed class StandardSeriesDto
     /// <summary>规范系列唯一标识。</summary>
     public long Id { get; init; }
 
+    /// <summary>规范系列所属分类 ID。</summary>
+    public long? CategoryId { get; init; }
+
     /// <summary>规范大类编码，例如 FLANGE。</summary>
     public string FamilyCode { get; init; } = string.Empty;
 

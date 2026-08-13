@@ -55,6 +55,33 @@ public sealed class StandardsController : ControllerBase
         catch (KeyNotFoundException ex) { return NotFound(new { success = false, message = ex.Message }); }
     }
 
+    /// <summary>
+    /// 修改规范系列名称。
+    /// </summary>
+    [HttpPut("management/series/{seriesId:long}/name")]
+    public async Task<ActionResult<StandardManagementOperationResponse>> RenameManagementSeriesAsync(
+        long seriesId,
+        [FromBody] StandardSeriesRenameRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!StandardManagementAuthorization.IsAdministrator(Request, out string operatorName))
+            return StatusCode(StatusCodes.Status403Forbidden, new { success = false, message = "只有 sa、SYSDBA、admin 可以管理规范库。" });
+
+        try
+        {
+            await _standardManagementCommandService.RenameSeriesAsync(
+                seriesId, request?.Name ?? string.Empty, operatorName, cancellationToken).ConfigureAwait(false);
+            return Ok(new StandardManagementOperationResponse
+            {
+                Success = true,
+                Message = "规范系列重命名成功。",
+                Id = seriesId
+            });
+        }
+        catch (ArgumentException ex) { return BadRequest(new { success = false, message = ex.Message }); }
+        catch (KeyNotFoundException ex) { return NotFound(new { success = false, message = ex.Message }); }
+    }
+
     [HttpPost("management/categories/{categoryId:long}/move")]
     public async Task<ActionResult<StandardManagementOperationResponse>> MoveManagementCategoryAsync(
         long categoryId,
@@ -474,6 +501,7 @@ public sealed class StandardsController : ControllerBase
         [FromForm] string pressureRating,
         [FromForm] string? flangeType,
         [FromForm] string? faceType,
+        [FromForm] long? categoryId,
         CancellationToken cancellationToken)
     {
         if (file == null || file.Length == 0)
@@ -487,6 +515,7 @@ public sealed class StandardsController : ControllerBase
             {
                 FamilyCode = familyCode?.Trim() ?? string.Empty,
                 FamilyName = familyName?.Trim() ?? string.Empty,
+                CategoryId = categoryId,
                 SeriesCode = seriesCode?.Trim() ?? string.Empty,
                 SeriesName = seriesName?.Trim() ?? string.Empty,
                 StandardNumber = standardNumber?.Trim() ?? string.Empty,

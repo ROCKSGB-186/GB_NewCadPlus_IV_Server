@@ -10,11 +10,11 @@
     <!-- 启用隐式 using -->
     <Version>1.0.1</Version>
     <!-- 程序集语义版本号（可根据发布流程变更） -->
-    <AssemblyVersion>3.26.08010.139</AssemblyVersion>
+    <AssemblyVersion>3.26.08012.140</AssemblyVersion>
     <!-- 程序集版本（建议随重大变更更新） -->
-    <FileVersion>3.26.08010.139</FileVersion>
+    <FileVersion>3.26.08012.140</FileVersion>
     <!-- 文件版本（便于发布包/部署查看） -->
-    <InformationalVersion>3.26.08010.139</InformationalVersion>
+    <InformationalVersion>3.26.08012.140</InformationalVersion>
     <OutputType>Exe</OutputType>
     <!-- 可包含 Git SHA 或语义版本扩展 -->
   </PropertyGroup>

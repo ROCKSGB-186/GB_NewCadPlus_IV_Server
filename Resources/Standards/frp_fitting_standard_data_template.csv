@@ -1,0 +1,2 @@
+FittingType,DN1,DN2,DN3,PN,StandardNumber,ProductSeries,Angle,CenterlineRadius,OuterDiameter1,OuterDiameter2,WallThickness,FaceToFaceLength,EndToEndLength,BranchLength,DesignPressure,DesignTemperature,Medium,ResinSystem,Reinforcement,CorrosionBarrier,JointType,ConnectionSpecification,UnitWeight,Manufacturer,SourceTable,SourceRowNumber
+ELBOW,DN100,,,,,,,,,,,,,,,,,,,,,,,,,

@@ -33,6 +33,11 @@ builder.Services.AddScoped<GraphicQueryService>();
 // 注册规范查询服务；规范数据库仍由服务器统一访问，客户端只通过 HTTP 查询。
 builder.Services.AddScoped<StandardQueryService>();
 
+// 注册专业规范解析器目录。现有法兰导入仍走兼容入口，后续专业解析器按 FamilyCode 接入。
+builder.Services.AddSingleton<IStandardImportParser, FlangeStandardImportParser>();
+builder.Services.AddSingleton<IStandardImportParser, PipeStandardImportParser>();
+builder.Services.AddSingleton<StandardImportParserRegistry>();
+
 // 注册管道通用字段目录服务；第一阶段提供字段定义、默认值和进口/出口图面样式。
 builder.Services.AddScoped<PipelineCatalogService>();
 

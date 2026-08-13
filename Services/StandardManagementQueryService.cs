@@ -127,6 +127,7 @@ public sealed class StandardManagementQueryService
         string table = databaseType == "DM"
             ? $"{schema}.STANDARD_DOCUMENT_VERSIONS"
             : "standard_document_versions";
+        string parameterPrefix = databaseType == "DM" ? ":" : "@";
         string sql = $"""
             SELECT
                 ID AS Id,
@@ -140,16 +141,20 @@ public sealed class StandardManagementQueryService
                 CREATED_AT AS CreatedAt,
                 CREATED_BY AS CreatedBy
             FROM {table}
-            WHERE SERIES_ID = @SeriesId AND IS_DELETED = 0
+            WHERE SERIES_ID = {parameterPrefix}SeriesId AND IS_DELETED = 0
             ORDER BY CREATED_AT DESC, ID DESC
             """;
 
         await using DbConnection connection = await OpenConnectionAsync(databaseType, cancellationToken)
             .ConfigureAwait(false);
-        IEnumerable<StandardDocumentVersionDto> rows = await connection.QueryAsync<StandardDocumentVersionDto>(
+        _logger.LogInformation(
+            "开始查询规范版本：SeriesId={SeriesId}, DatabaseType={DatabaseType}, ParameterPrefix={ParameterPrefix}",
+            seriesId, databaseType, parameterPrefix);
+        List<StandardDocumentVersionDto> rows = (await connection.QueryAsync<StandardDocumentVersionDto>(
             new CommandDefinition(sql, new { SeriesId = seriesId }, cancellationToken: cancellationToken))
-            .ConfigureAwait(false);
-        return rows.ToList();
+            .ConfigureAwait(false)).ToList();
+        _logger.LogInformation("规范版本查询完成：SeriesId={SeriesId}, VersionCount={VersionCount}", seriesId, rows.Count());
+        return rows;
     }
 
     private async Task<(List<StandardManagementCategoryDto> categories, List<StandardManagementSeriesDto> series)> QueryMySqlTreeAsync(

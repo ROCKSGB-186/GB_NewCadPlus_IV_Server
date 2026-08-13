@@ -70,6 +70,37 @@ public sealed class StandardManagementCommandService
         }
     }
 
+    /// <summary>
+    /// 修改规范系列名称，不修改规范编码和实际规范内容记录。
+    /// </summary>
+    public async Task RenameSeriesAsync(
+        long seriesId,
+        string name,
+        string operatorName,
+        CancellationToken cancellationToken = default)
+    {
+        if (seriesId <= 0) throw new ArgumentException("规范系列 ID 必须大于 0。", nameof(seriesId));
+        if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("规范名称不能为空。", nameof(name));
+        if (string.IsNullOrWhiteSpace(operatorName)) throw new ArgumentException("操作用户名不能为空。", nameof(operatorName));
+
+        string databaseType = GetDatabaseType();
+        string schema = GetSchemaName();
+        string table = databaseType == "DM" ? $"{schema}.STANDARD_SERIES" : "standard_series";
+        string parameter = databaseType == "DM" ? ":" : "@";
+        string normalizedName = name.Trim();
+
+        await using DbConnection connection = await OpenConnectionAsync(databaseType, cancellationToken).ConfigureAwait(false);
+        int affected = await connection.ExecuteAsync(new CommandDefinition(
+            $"UPDATE {table} SET SERIES_NAME={parameter}Name,UPDATED_AT=CURRENT_TIMESTAMP WHERE ID={parameter}Id AND IS_ACTIVE=1",
+            new { Id = seriesId, Name = normalizedName }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        if (affected == 0)
+            throw new KeyNotFoundException("规范系列不存在或已停用。");
+
+        _logger.LogInformation(
+            "规范系列重命名成功：SeriesId={SeriesId}, Name={Name}, Operator={OperatorName}",
+            seriesId, normalizedName, operatorName);
+    }
+
     public async Task MoveCategoryAsync(
         long categoryId,
         long? parentId,
