@@ -18,15 +18,20 @@ public sealed class StandardImportService
 {
     private readonly IConfiguration _configuration;
     private readonly ILogger<StandardImportService> _logger;
+    private readonly StandardManagementQueryService _standardManagementQueryService;
     private readonly ConcurrentDictionary<string, ImportBatch> _batches = new(StringComparer.Ordinal);
 
     /// <summary>
     /// 创建规范导入服务。
     /// </summary>
-    public StandardImportService(IConfiguration configuration, ILogger<StandardImportService> logger)
+    public StandardImportService(
+        IConfiguration configuration,
+        ILogger<StandardImportService> logger,
+        StandardManagementQueryService standardManagementQueryService)
     {
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _standardManagementQueryService = standardManagementQueryService ?? throw new ArgumentNullException(nameof(standardManagementQueryService));
     }
 
     /// <summary>
@@ -35,6 +40,7 @@ public sealed class StandardImportService
     public async Task<StandardImportPreviewResponse> PreviewAsync(
         Stream excelStream,
         StandardSeriesDto series,
+        string sourceFileName = "",
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(excelStream);
@@ -70,13 +76,35 @@ public sealed class StandardImportService
 
         int errorCount = rows.Sum(row => row.Errors.Count);
         int warningCount = rows.Sum(row => row.Warnings.Count);
+        StandardIdentityResolveResponse identity = await _standardManagementQueryService
+            .ResolveIdentityAsync(series, cancellationToken)
+            .ConfigureAwait(false);
+        StandardImportDuplicateSeriesDto? duplicateSeries = await FindDuplicateSeriesAsync(series, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "规范 Excel 预览完成。BatchId={BatchId}, FileName={FileName}, SeriesName={SeriesName}, StandardNumber={StandardNumber}, TableNumber={TableNumber}, PressureRating={PressureRating}, RowCount={RowCount}, ErrorCount={ErrorCount}, WarningCount={WarningCount}, DuplicateSeriesId={DuplicateSeriesId}",
+            batchId,
+            Path.GetFileName(sourceFileName ?? string.Empty),
+            series.SeriesName,
+            series.StandardNumber,
+            series.TableNumber,
+            series.PressureRating,
+            rows.Count,
+            errorCount,
+            warningCount,
+            duplicateSeries?.SeriesId);
 
         return new StandardImportPreviewResponse
         {
             Success = errorCount == 0,
             Message = errorCount == 0 ? "Excel 解析成功，请确认后导入。" : "Excel 存在错误，请修正后重新上传。",
             BatchId = batchId,
+            SourceFileName = Path.GetFileName(sourceFileName ?? string.Empty),
+            Series = series,
+            DuplicateSeries = duplicateSeries,
+            IdentityResult = ToIdentityResult(identity),
             Rows = rows,
+            RowCount = rows.Count,
             ErrorCount = errorCount,
             WarningCount = warningCount
         };
@@ -87,6 +115,7 @@ public sealed class StandardImportService
     /// </summary>
     public async Task<StandardImportPreviewResponse> PreviewJsonAsync(
         Stream jsonStream,
+        string sourceFileName = "",
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(jsonStream);
@@ -136,12 +165,35 @@ public sealed class StandardImportService
 
         int errorCount = rows.Sum(row => row.Errors.Count);
         int warningCount = rows.Sum(row => row.Warnings.Count);
+        StandardIdentityResolveResponse identity = await _standardManagementQueryService
+            .ResolveIdentityAsync(series, cancellationToken)
+            .ConfigureAwait(false);
+        StandardImportDuplicateSeriesDto? duplicateSeries = await FindDuplicateSeriesAsync(series, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "规范 JSON 预览完成。BatchId={BatchId}, FileName={FileName}, SeriesName={SeriesName}, StandardNumber={StandardNumber}, TableNumber={TableNumber}, PressureRating={PressureRating}, RowCount={RowCount}, ErrorCount={ErrorCount}, WarningCount={WarningCount}, DuplicateSeriesId={DuplicateSeriesId}",
+            batchId,
+            Path.GetFileName(sourceFileName ?? string.Empty),
+            series.SeriesName,
+            series.StandardNumber,
+            series.TableNumber,
+            series.PressureRating,
+            rows.Count,
+            errorCount,
+            warningCount,
+            duplicateSeries?.SeriesId);
+
         return new StandardImportPreviewResponse
         {
             Success = errorCount == 0,
             Message = errorCount == 0 ? "JSON 解析成功，请确认后导入。" : "JSON 存在错误，请修正后重新上传。",
             BatchId = batchId,
+            SourceFileName = Path.GetFileName(sourceFileName ?? string.Empty),
+            Series = series,
+            DuplicateSeries = duplicateSeries,
+            IdentityResult = ToIdentityResult(identity),
             Rows = rows,
+            RowCount = rows.Count,
             ErrorCount = errorCount,
             WarningCount = warningCount
         };
@@ -151,11 +203,15 @@ public sealed class StandardImportService
     /// 确认预览批次并以事务方式写入数据库。
     /// </summary>
     public async Task<StandardImportCommitResponse> CommitAsync(
-        string batchId,
-        bool allowWarnings,
+        StandardImportCommitRequest request,
+        string operatorName,
         CancellationToken cancellationToken = default)
     {
-        string normalizedBatchId = batchId?.Trim() ?? string.Empty;
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(operatorName))
+            throw new ArgumentException("操作用户名不能为空。", nameof(operatorName));
+
+        string normalizedBatchId = request.BatchId?.Trim() ?? string.Empty;
         if (!_batches.TryGetValue(normalizedBatchId, out ImportBatch? batch))
         {
             throw new KeyNotFoundException("导入批次不存在或已过期，请重新上传 Excel。");
@@ -166,10 +222,32 @@ public sealed class StandardImportService
             throw new InvalidOperationException("导入批次存在错误行，不能确认导入。");
         }
 
-        if (!allowWarnings && batch.Rows.Any(row => row.Warnings.Count > 0))
+        if (!request.AllowWarnings && batch.Rows.Any(row => row.Warnings.Count > 0))
         {
             throw new InvalidOperationException("导入批次存在警告，请确认警告后再提交。");
         }
+
+        StandardSeriesDto committedSeries = BuildCommittedSeries(batch.Series, request.Series);
+        StandardImportDuplicateSeriesDto? duplicateSeries = await FindDuplicateSeriesAsync(committedSeries, cancellationToken).ConfigureAwait(false);
+        if (duplicateSeries != null)
+        {
+            if (request.DuplicateStrategy == StandardImportDuplicateStrategy.NewImport)
+            {
+                throw new InvalidOperationException(
+                    $"已存在相同规范：{duplicateSeries.SeriesName}-{duplicateSeries.StandardNumber}-{duplicateSeries.TableNumber}-{duplicateSeries.PressureRating}。请等待版本数据迁移完成后再选择创建新版本或覆盖当前数据。");
+            }
+
+            throw new InvalidOperationException(
+                "当前系统尚未完成法兰规范记录的版本快照与恢复能力，暂不允许创建新版本或覆盖当前数据，以避免丢失历史规范内容。");
+        }
+
+        if (request.DuplicateStrategy != StandardImportDuplicateStrategy.NewImport)
+        {
+            throw new InvalidOperationException("未发现同名规范时只能选择“导入为新规范”。");
+        }
+
+        batch = batch with { Series = committedSeries };
+        _batches[normalizedBatchId] = batch;
 
         string databaseType = GetDatabaseType();
         try
@@ -180,6 +258,18 @@ public sealed class StandardImportService
 
             // 只有数据库事务成功后才删除批次，便于校验失败或警告确认失败后重试。
             _batches.TryRemove(normalizedBatchId, out _);
+
+            _logger.LogInformation(
+                "规范导入提交成功。BatchId={BatchId}, Operator={OperatorName}, Strategy={Strategy}, SeriesName={SeriesName}, StandardNumber={StandardNumber}, TableNumber={TableNumber}, PressureRating={PressureRating}, ImportedCount={ImportedCount}, WarningCount={WarningCount}",
+                normalizedBatchId,
+                operatorName,
+                request.DuplicateStrategy,
+                committedSeries.SeriesName,
+                committedSeries.StandardNumber,
+                committedSeries.TableNumber,
+                committedSeries.PressureRating,
+                imported,
+                batch.Rows.Sum(row => row.Warnings.Count));
 
             return new StandardImportCommitResponse
             {
@@ -192,9 +282,157 @@ public sealed class StandardImportService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "规范数据导入失败。BatchId={BatchId}, DatabaseType={DatabaseType}, Schema={Schema}", batchId, databaseType, GetSchemaName());
+            _logger.LogError(ex, "规范数据导入失败。BatchId={BatchId}, Operator={OperatorName}, Strategy={Strategy}, DatabaseType={DatabaseType}, Schema={Schema}", normalizedBatchId, operatorName, request.DuplicateStrategy, databaseType, GetSchemaName());
             throw;
         }
+    }
+
+    /// <summary>
+    /// 只允许用户修改页面公开的四段名称，分类、系列编码和法兰类型等系统字段继续使用预览批次中的可信值。
+    /// </summary>
+    private static StandardSeriesDto BuildCommittedSeries(StandardSeriesDto previewSeries, StandardSeriesDto submittedSeries)
+    {
+        ArgumentNullException.ThrowIfNull(previewSeries);
+        ArgumentNullException.ThrowIfNull(submittedSeries);
+
+        string seriesName = RequireMetadataValue(submittedSeries.SeriesName, "规范注释名称");
+        string standardNumber = RequireMetadataValue(submittedSeries.StandardNumber, "规范代号");
+        string tableNumber = RequireMetadataValue(submittedSeries.TableNumber, "表号");
+        string pressureRating = RequireMetadataValue(submittedSeries.PressureRating, "型号");
+
+        return new StandardSeriesDto
+        {
+            CategoryId = previewSeries.CategoryId,
+            FamilyCode = previewSeries.FamilyCode,
+            FamilyName = previewSeries.FamilyName,
+            SeriesCode = previewSeries.SeriesCode,
+            SeriesName = seriesName,
+            StandardNumber = standardNumber,
+            TableNumber = tableNumber,
+            PressureRating = pressureRating,
+            FlangeType = previewSeries.FlangeType,
+            FaceType = previewSeries.FaceType
+        };
+    }
+
+    /// <summary>
+    /// 校验用户编辑后的规范名称字段并统一去除首尾空白。
+    /// </summary>
+    private static string RequireMetadataValue(string? value, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            throw new ArgumentException($"{fieldName}不能为空。", nameof(value));
+
+        return value.Trim();
+    }
+
+    /// <summary>
+    /// 将统一身份查询结果转换为导入预览使用的三态结果。
+    /// </summary>
+    private static StandardImportIdentityResultDto ToIdentityResult(StandardIdentityResolveResponse identity)
+    {
+        string status = identity.MatchCount switch
+        {
+            0 => "NEW",
+            1 => "EXISTING",
+            _ => "CONFLICT"
+        };
+
+        StandardManagementSeriesDto? existingSeries = identity.IsUniqueMatch ? identity.Series : null;
+        return new StandardImportIdentityResultDto
+        {
+            Status = status,
+            MatchCount = identity.MatchCount,
+            IsUniqueMatch = identity.IsUniqueMatch,
+            Message = status == "NEW"
+                ? "规范身份未命中，可以作为新规范导入。"
+                : status == "EXISTING"
+                    ? "规范身份已命中已有规范系列，请选择后续导入策略。"
+                    : "规范身份匹配到多个系列，不能继续确认导入。",
+            ExistingSeries = existingSeries,
+            CurrentVersion = identity.IsUniqueMatch ? identity.CurrentVersion : null
+        };
+    }
+
+    /// <summary>
+    /// 按当前数据表的实际唯一标识精确查询已存在的规范系列，预览阶段只读取，不修改任何数据。
+    /// </summary>
+    private async Task<StandardImportDuplicateSeriesDto?> FindDuplicateSeriesAsync(
+        StandardSeriesDto series,
+        CancellationToken cancellationToken)
+    {
+        string databaseType = GetDatabaseType();
+        string familyCode = NormalizeCode(series.FamilyCode);
+        string seriesCode = NormalizeCode(series.SeriesCode);
+        string standardNumber = NormalizeCode(series.StandardNumber);
+        string tableNumber = NormalizeCode(series.TableNumber);
+        string pressureRating = NormalizeCode(series.PressureRating);
+
+        if (databaseType == "MYSQL")
+        {
+            const string sql = @"
+SELECT
+    ss.id AS SeriesId,
+    ss.series_name AS SeriesName,
+    ss.standard_number AS StandardNumber,
+    ss.table_number AS TableNumber,
+    ss.pressure_rating AS PressureRating,
+    COUNT(sfr.id) AS RecordCount
+FROM standard_series ss
+INNER JOIN standard_families sf ON sf.id = ss.family_id AND sf.is_active = 1
+LEFT JOIN standard_flange_records sfr ON sfr.series_id = ss.id AND sfr.is_active = 1
+WHERE ss.is_active = 1
+  AND sf.code = @FamilyCode
+  AND ss.series_code = @SeriesCode
+  AND ss.standard_number = @StandardNumber
+  AND ss.table_number = @TableNumber
+  AND ss.pressure_rating = @PressureRating
+GROUP BY ss.id, ss.series_name, ss.standard_number, ss.table_number, ss.pressure_rating";
+
+            await using var connection = new MySqlConnection(GetConnectionString("MYSQL"));
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            return await connection.QuerySingleOrDefaultAsync<StandardImportDuplicateSeriesDto>(
+                new CommandDefinition(sql, new
+                {
+                    FamilyCode = familyCode,
+                    SeriesCode = seriesCode,
+                    StandardNumber = standardNumber,
+                    TableNumber = tableNumber,
+                    PressureRating = pressureRating
+                }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        }
+
+        string schema = GetSchemaName();
+        string dmSql = $@"
+SELECT
+    ss.ID AS SeriesId,
+    ss.SERIES_NAME AS SeriesName,
+    ss.STANDARD_NUMBER AS StandardNumber,
+    ss.TABLE_NUMBER AS TableNumber,
+    ss.PRESSURE_RATING AS PressureRating,
+    COUNT(sfr.ID) AS RecordCount
+FROM {schema}.STANDARD_SERIES ss
+INNER JOIN {schema}.STANDARD_FAMILIES sf ON sf.ID = ss.FAMILY_ID AND sf.IS_ACTIVE = 1
+LEFT JOIN {schema}.STANDARD_FLANGE_RECORDS sfr ON sfr.SERIES_ID = ss.ID AND sfr.IS_ACTIVE = 1
+WHERE ss.IS_ACTIVE = 1
+  AND sf.CODE = :FamilyCode
+  AND ss.SERIES_CODE = :SeriesCode
+  AND ss.STANDARD_NUMBER = :StandardNumber
+  AND ss.TABLE_NUMBER = :TableNumber
+  AND ss.PRESSURE_RATING = :PressureRating
+GROUP BY ss.ID, ss.SERIES_NAME, ss.STANDARD_NUMBER, ss.TABLE_NUMBER, ss.PRESSURE_RATING";
+
+        await using var dmConnection = new DmConnection(GetConnectionString("DM"));
+        await dmConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        return await dmConnection.QuerySingleOrDefaultAsync<StandardImportDuplicateSeriesDto>(
+            new CommandDefinition(dmSql, new
+            {
+                FamilyCode = familyCode,
+                SeriesCode = seriesCode,
+                StandardNumber = standardNumber,
+                TableNumber = tableNumber,
+                PressureRating = pressureRating
+            }, cancellationToken: cancellationToken)).ConfigureAwait(false);
     }
 
     private static List<StandardImportRowDto> ParseWorkbook(Stream stream, StandardSeriesDto series)

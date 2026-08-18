@@ -90,6 +90,21 @@ public sealed class StandardQueryService
                 ? await QueryDmAsync(familyCode, seriesCode, request, dn, dnValue, pn, cancellationToken).ConfigureAwait(false)
                 : await QueryMySqlAsync(familyCode, seriesCode, request, dn, dnValue, pn, cancellationToken).ConfigureAwait(false);
 
+            // 动态导入规范保存在版本行 JSON 中，不会写入静态 STANDARD_FLANGE_RECORDS。
+            // 静态表未命中时继续查询当前动态版本，确保规范树中已导入的法兰表也能参与插入匹配。
+            if (data == null)
+            {
+                data = await QueryDynamicAsync(
+                    familyCode,
+                    seriesCode,
+                    request,
+                    dn,
+                    dnValue,
+                    pn,
+                    databaseType,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             if (data == null)
             {
                 _logger.LogWarning(
@@ -106,7 +121,6 @@ public sealed class StandardQueryService
                     IsUniqueMatch = false
                 };
             }
-
             FlangeStandardRecordDto record = data.Record;
             Dictionary<string, string> attributes = ToCadAttributes(data.Series, record, selectedSeries);
 
@@ -136,7 +150,8 @@ public sealed class StandardQueryService
         {
             _logger.LogError(
                 ex,
-                "查询法兰规范失败。SeriesCode={SeriesCode}, DN={DN}, PN={PN}, DatabaseType={DatabaseType}",
+                "查询法兰规范失败：FamilyCode={FamilyCode}, SeriesCode={SeriesCode}, DN={DN}, PN={PN}, DatabaseType={DatabaseType}",
+                familyCode,
                 seriesCode,
                 dn,
                 pn,
@@ -204,6 +219,123 @@ public sealed class StandardQueryService
         return rows.Select(row => ToMatchData(row).Record).ToList();
     }
 
+    /// <summary>
+    /// 查询动态规范系列当前版本的原始字段行。
+    /// </summary>
+    public async Task<DynamicStandardContentResponse?> GetDynamicContentAsync(
+        long seriesId,
+        CancellationToken cancellationToken = default)
+    {
+        if (seriesId <= 0)
+            throw new ArgumentException("规范系列 ID 必须大于 0。", nameof(seriesId));
+
+        string databaseType = GetDatabaseType();
+        string schema = GetSchemaName();
+        string versionTable = databaseType == "DM" ? $"{schema}.STANDARD_DOCUMENT_VERSIONS" : "standard_document_versions";
+        string rowTable = databaseType == "DM" ? $"{schema}.STANDARD_DYNAMIC_VERSION_ROWS" : "standard_dynamic_version_rows";
+        string parameter = databaseType == "DM" ? ":" : "@";
+        string sql = $"""
+            SELECT v.SERIES_ID AS SeriesId, v.ID AS VersionId, v.VERSION_NO AS VersionNo, v.VERSION_LABEL AS VersionLabel,
+                   r.ROW_NUMBER AS RowNumber, r.VALUES_JSON AS ValuesJson
+            FROM {versionTable} v
+            INNER JOIN {rowTable} r ON r.VERSION_ID = v.ID
+            WHERE v.SERIES_ID={parameter}SeriesId AND v.IS_CURRENT=1 AND v.IS_DELETED=0
+            ORDER BY r.ROW_NUMBER, r.ROW_ID
+            """;
+
+        await using DbConnection connection = databaseType == "DM"
+            ? new DmConnection(GetConnectionString("DM"))
+            : new MySqlConnection(GetConnectionString("MYSQL"));
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        List<DynamicContentRow> rows = (await connection.QueryAsync<DynamicContentRow>(
+            new CommandDefinition(sql, new { SeriesId = seriesId }, cancellationToken: cancellationToken)).ConfigureAwait(false)).AsList();
+        if (rows.Count == 0)
+            return null;
+
+        return new DynamicStandardContentResponse
+        {
+            SeriesId = seriesId,
+            VersionId = rows[0].VersionId,
+            VersionNo = rows[0].VersionNo,
+            VersionLabel = rows[0].VersionLabel,
+            Rows = rows.Select(row => new DynamicStandardContentRowDto
+            {
+                RowNumber = row.RowNumber,
+                Values = JsonSerializer.Deserialize<Dictionary<string, string>>(row.ValuesJson)
+                    ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            }).ToList()
+        };
+    }
+
+    public async Task<DynamicStandardContentResponse?> GetDynamicContentByVersionAsync(
+        long versionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (versionId <= 0)
+            throw new ArgumentException("规范版本 ID 必须大于 0。", nameof(versionId));
+
+        string databaseType = GetDatabaseType();
+        string schema = GetSchemaName();
+        string versionTable = databaseType == "DM" ? $"{schema}.STANDARD_DOCUMENT_VERSIONS" : "standard_document_versions";
+        string rowTable = databaseType == "DM" ? $"{schema}.STANDARD_DYNAMIC_VERSION_ROWS" : "standard_dynamic_version_rows";
+        string parameter = databaseType == "DM" ? ":" : "@";
+        string sql = $"""
+        SELECT v.SERIES_ID AS SeriesId, v.ID AS VersionId, v.VERSION_NO AS VersionNo,
+               v.VERSION_LABEL AS VersionLabel, r.ROW_NUMBER AS RowNumber,
+               r.VALUES_JSON AS ValuesJson
+        FROM {versionTable} v
+        INNER JOIN {rowTable} r ON r.VERSION_ID = v.ID
+        WHERE v.ID={parameter}VersionId AND v.IS_DELETED=0
+        ORDER BY r.ROW_NUMBER, r.ROW_ID
+        """;
+
+        await using DbConnection connection = databaseType == "DM"
+            ? new DmConnection(GetConnectionString("DM"))
+            : new MySqlConnection(GetConnectionString("MYSQL"));
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        List<DynamicContentRow> rows = (await connection.QueryAsync<DynamicContentRow>(
+            new CommandDefinition(sql, new { VersionId = versionId }, cancellationToken: cancellationToken)).ConfigureAwait(false)).AsList();
+        if (rows.Count == 0)
+            return null;
+
+        return new DynamicStandardContentResponse
+        {
+            SeriesId = rows[0].SeriesId,
+            VersionId = rows[0].VersionId,
+            VersionNo = rows[0].VersionNo,
+            VersionLabel = rows[0].VersionLabel,
+            Rows = rows.Select(row => new DynamicStandardContentRowDto
+            {
+                RowNumber = row.RowNumber,
+                Values = JsonSerializer.Deserialize<Dictionary<string, string>>(row.ValuesJson)
+                    ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            }).ToList()
+        };
+    }
+
+    /// <summary>
+    /// 动态规范内容查询结果行。
+    /// </summary>
+    private sealed class DynamicContentRow
+    {
+        public long SeriesId { get; init; }
+        public long VersionId { get; init; }
+        public string VersionNo { get; init; } = string.Empty;
+        public string VersionLabel { get; init; } = string.Empty;
+        public int RowNumber { get; init; }
+        public string ValuesJson { get; init; } = "{}";
+    }
+    /// <summary>
+    /// 使用 MySQL 查询指定规范系列下的唯一法兰规范记录。
+    /// </summary>
+    /// <param name="familyCode">规范系列的家族代码。</param>
+    /// <param name="seriesCode">规范系列代码。</param>
+    /// <param name="request">标准匹配请求对象。</param>
+    /// <param name="dn">公称直径。</param>
+    /// <param name="dnValue">公称直径值。</param>
+    /// <param name="pn">公称压力。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>返回匹配的标准数据，如果未找到则返回 null。</returns>
     private async Task<StandardMatchData?> QueryMySqlAsync(
         string familyCode,
         string seriesCode,
@@ -294,6 +426,218 @@ LIMIT 1";
         return row == null ? null : ToMatchData(row);
     }
 
+    /// <summary>
+    /// 从当前动态规范版本的 JSON 行中匹配法兰记录。
+    /// </summary>
+    private async Task<StandardMatchData?> QueryDynamicAsync(
+        string familyCode,
+        string seriesCode,
+        StandardMatchRequest request,
+        string dn,
+        int dnValue,
+        string pn,
+        string databaseType,
+        CancellationToken cancellationToken)
+    {
+        string schema = GetSchemaName();
+        string versionTable = databaseType == "DM"
+            ? $"{schema}.STANDARD_DOCUMENT_VERSIONS"
+            : "standard_document_versions";
+        string rowTable = databaseType == "DM"
+            ? $"{schema}.STANDARD_DYNAMIC_VERSION_ROWS"
+            : "standard_dynamic_version_rows";
+        string seriesTable = databaseType == "DM"
+            ? $"{schema}.STANDARD_SERIES"
+            : "standard_series";
+        string familyTable = databaseType == "DM"
+            ? $"{schema}.STANDARD_FAMILIES"
+            : "standard_families";
+        string parameter = databaseType == "DM" ? ":" : "@";
+        string sql = $"""
+            SELECT ss.ID AS SeriesId, sf.CODE AS FamilyCode, sf.NAME AS FamilyName,
+                   ss.SERIES_CODE AS SeriesCode, ss.SERIES_NAME AS SeriesName,
+                   ss.STANDARD_NUMBER AS StandardNumber, ss.TABLE_NUMBER AS TableNumber,
+                   ss.PRESSURE_RATING AS PressureRating, ss.FLANGE_TYPE AS FlangeType,
+                   ss.FACE_TYPE AS FaceType, r.ROW_NUMBER AS SourceRowNumber,
+                   r.VALUES_JSON AS ValuesJson
+            FROM {versionTable} v
+            INNER JOIN {rowTable} r ON r.VERSION_ID = v.ID
+            INNER JOIN {seriesTable} ss ON ss.ID = v.SERIES_ID AND ss.IS_ACTIVE = 1
+            INNER JOIN {familyTable} sf ON sf.ID = ss.FAMILY_ID AND sf.IS_ACTIVE = 1
+            WHERE sf.CODE = {parameter}FamilyCode
+              AND v.IS_CURRENT = 1
+              AND v.IS_DELETED = 0
+            ORDER BY CASE WHEN ss.SERIES_CODE = {parameter}SeriesCode THEN 0 ELSE 1 END,
+                     CASE WHEN ss.STANDARD_NUMBER = {parameter}StandardNumber THEN 0 ELSE 1 END,
+                     r.ROW_NUMBER
+            """;
+
+        await using DbConnection connection = databaseType == "DM"
+            ? new DmConnection(GetConnectionString("DM"))
+            : new MySqlConnection(GetConnectionString("MYSQL"));
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        string? requestedStandardNumber = NormalizeOptional(request.StandardNumber);
+        IEnumerable<DynamicMatchRow> rows = await connection.QueryAsync<DynamicMatchRow>(
+            new CommandDefinition(sql, new
+            {
+                FamilyCode = familyCode,
+                SeriesCode = seriesCode,
+                StandardNumber = requestedStandardNumber ?? string.Empty
+            }, cancellationToken: cancellationToken))
+            .ConfigureAwait(false);
+
+        int rowCount = 0;
+        int dnMatchCount = 0;
+        int pnMatchCount = 0;
+        foreach (DynamicMatchRow row in rows)
+        {
+            rowCount++;
+            Dictionary<string, string> values = DeserializeDictionary(row.ValuesJson);
+            string rowDn = NormalizeDn(GetDynamicValue(values,
+                "DN", "DNValue", "DN值", "公称通径", "公称直径"));
+            string rowPn = GetDynamicValue(values,
+                "PN", "PNValue", "PN值", "公称压力", "压力等级");
+            if (string.Equals(rowDn, dn, StringComparison.OrdinalIgnoreCase))
+                dnMatchCount++;
+
+            if (!string.Equals(rowDn, dn, StringComparison.OrdinalIgnoreCase)
+                || !PressureEquals(rowPn, pn))
+            {
+                continue;
+            }
+            pnMatchCount++;
+
+            string? standardNumber = NormalizeOptional(request.StandardNumber);
+            if (standardNumber != null
+                && !string.Equals(NormalizeCode(row.StandardNumber), standardNumber, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(NormalizeCode(GetDynamicValue(values, "StandardNumber", "标准号", "STANDARD_NO")), standardNumber, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string? tableNumber = NormalizeOptional(request.TableNumber);
+            if (tableNumber != null
+                && !string.Equals(NormalizeCode(row.TableNumber), tableNumber, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            FlangeStandardRecordDto record = ToDynamicRecord(row, values, dn, dnValue, rowPn);
+            _logger.LogInformation(
+                "动态规范数据库命中：SeriesId={SeriesId}, RowNumber={RowNumber}, DN={DN}, PN={PN}",
+                row.SeriesId, row.SourceRowNumber, dn, rowPn);
+            return new StandardMatchData(ToDynamicSeries(row), record);
+        }
+
+        _logger.LogInformation(
+            "动态规范数据库未命中：FamilyCode={FamilyCode}, RequestedSeriesCode={SeriesCode}, DN={DN}, PN={PN}, DynamicRowCount={RowCount}, DNMatchCount={DNMatchCount}, DNPNMatchCount={PNMatchCount}",
+            familyCode, seriesCode, dn, pn, rowCount, dnMatchCount, pnMatchCount);
+        return null;
+    }
+
+    private static StandardSeriesData ToDynamicSeries(DynamicMatchRow row) => new()
+    {
+        Id = row.SeriesId,
+        FamilyCode = row.FamilyCode,
+        FamilyName = row.FamilyName,
+        SeriesCode = row.SeriesCode,
+        SeriesName = row.SeriesName,
+        StandardNumber = row.StandardNumber,
+        TableNumber = row.TableNumber,
+        PressureRating = row.PressureRating,
+        FlangeType = row.FlangeType,
+        FaceType = row.FaceType
+    };
+
+    private static FlangeStandardRecordDto ToDynamicRecord(
+        DynamicMatchRow row,
+        Dictionary<string, string> values,
+        string dn,
+        int dnValue,
+        string pn) => new()
+    {
+        Id = row.SeriesId * 1000000 + row.SourceRowNumber,
+        SeriesId = row.SeriesId,
+        SourceRowNumber = row.SourceRowNumber,
+        DN = dn,
+        DNValue = dnValue,
+        PN = pn,
+        PipeOuterDiameterSeriesI = ParseDecimal(GetDynamicValue(values, "PipeOuterDiameterSeriesI")),
+        PipeOuterDiameterSeriesII = ParseDecimal(GetDynamicValue(values, "PipeOuterDiameterSeriesII")),
+        FlangeOuterDiameter = ParseDecimal(GetDynamicValue(values, "FlangeOuterDiameter")),
+        BoltCircleDiameter = ParseDecimal(GetDynamicValue(values, "BoltCircleDiameter")),
+        BoltHoleDiameter = ParseDecimal(GetDynamicValue(values, "BoltHoleDiameter")),
+        BoltCount = ParseInt(GetDynamicValue(values, "BoltCount")),
+        BoltSpecification = GetDynamicValue(values, "BoltSpecification"),
+        BoltRawSuffix = GetDynamicValue(values, "BoltRawSuffix"),
+        FlangeThickness = ParseDecimal(GetDynamicValue(values, "FlangeThickness")),
+        RaisedFaceHeight = ParseDecimal(GetDynamicValue(values, "RaisedFaceHeight")),
+        FlangeInnerDiameterSeriesI = ParseDecimal(GetDynamicValue(values, "FlangeInnerDiameterSeriesI")),
+        FlangeInnerDiameterSeriesII = ParseDecimal(GetDynamicValue(values, "FlangeInnerDiameterSeriesII")),
+        RawValues = values
+    };
+
+    private static string GetDynamicValue(Dictionary<string, string> values, params string[] names)
+    {
+        foreach (string name in names)
+        {
+            KeyValuePair<string, string> pair = values.FirstOrDefault(item =>
+                string.Equals(NormalizeDynamicKey(item.Key), NormalizeDynamicKey(name), StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(pair.Value))
+                return pair.Value.Trim();
+        }
+
+        return string.Empty;
+    }
+
+    private static string NormalizeDynamicKey(string value) =>
+        (value ?? string.Empty).Replace("_", string.Empty).Replace(" ", string.Empty).Trim().ToUpperInvariant();
+
+    private static bool PressureEquals(string left, string right)
+    {
+        string normalizedLeft = NormalizeCode(left).Replace("PN", string.Empty);
+        string normalizedRight = NormalizeCode(right).Replace("PN", string.Empty);
+        return decimal.TryParse(normalizedLeft, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal leftValue)
+            && decimal.TryParse(normalizedRight, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal rightValue)
+            && leftValue == rightValue;
+    }
+
+    private static decimal? ParseDecimal(string value) =>
+        decimal.TryParse((value ?? string.Empty).Trim(), NumberStyles.Number, CultureInfo.InvariantCulture, out decimal result)
+            ? result
+            : null;
+
+    private static int? ParseInt(string value) =>
+        int.TryParse((value ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int result)
+            ? result
+            : null;
+
+    private sealed class DynamicMatchRow
+    {
+        public long SeriesId { get; init; }
+        public string FamilyCode { get; init; } = string.Empty;
+        public string FamilyName { get; init; } = string.Empty;
+        public string SeriesCode { get; init; } = string.Empty;
+        public string SeriesName { get; init; } = string.Empty;
+        public string StandardNumber { get; init; } = string.Empty;
+        public string TableNumber { get; init; } = string.Empty;
+        public string PressureRating { get; init; } = string.Empty;
+        public string? FlangeType { get; init; }
+        public string? FaceType { get; init; }
+        public int SourceRowNumber { get; init; }
+        public string ValuesJson { get; init; } = "{}";
+    }
+    /// <summary>
+    /// 使用 DM 查询指定规范系列下的唯一法兰规范记录。
+    /// </summary>
+    /// <param name="familyCode">规范系列的家族代码。</param>
+    /// <param name="seriesCode">规范系列代码。</param>
+    /// <param name="request">标准匹配请求对象。</param>
+    /// <param name="dn">公称直径。</param>
+    /// <param name="dnValue">公称直径值。</param>
+    /// <param name="pn">公称压力。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>返回匹配的标准数据，如果未找到则返回 null。</returns>
     private async Task<StandardMatchData?> QueryDmAsync(
         string familyCode,
         string seriesCode,

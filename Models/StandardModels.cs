@@ -236,12 +236,51 @@ public sealed class StandardImportPreviewResponse
     /// <summary>导入批次临时标识。</summary>
     public string BatchId { get; init; } = string.Empty;
 
+    /// <summary>用户选择的原始规范文件名，仅用于预览展示和操作日志。</summary>
+    public string SourceFileName { get; init; } = string.Empty;
+
+    /// <summary>本次导入使用的可编辑规范元数据。</summary>
+    public StandardSeriesDto Series { get; init; } = new();
+
+    /// <summary>是否命中已有相同业务标识的规范系列。</summary>
+    public StandardImportDuplicateSeriesDto? DuplicateSeries { get; init; }
+
+    /// <summary>统一的规范身份判断结果：NEW、EXISTING 或 CONFLICT。</summary>
+    public StandardImportIdentityResultDto? IdentityResult { get; init; }
+
     /// <summary>预览行。</summary>
     public IReadOnlyList<StandardImportRowDto> Rows { get; init; } = Array.Empty<StandardImportRowDto>();
+
+    /// <summary>已解析的有效和问题数据总行数。</summary>
+    public int RowCount { get; init; }
 
     /// <summary>错误总数。</summary>
     public int ErrorCount { get; init; }
 
     /// <summary>警告总数。</summary>
     public int WarningCount { get; init; }
+}
+
+/// <summary>
+/// 预览阶段检测到的现有规范系列，用于让客户端在提交前明确选择新增或更新策略。
+/// </summary>
+public sealed class StandardImportDuplicateSeriesDto
+{
+    /// <summary>已存在规范系列的唯一标识。</summary>
+    public long SeriesId { get; init; }
+
+    /// <summary>已存在规范的显示名称。</summary>
+    public string SeriesName { get; init; } = string.Empty;
+
+    /// <summary>已存在规范的标准号。</summary>
+    public string StandardNumber { get; init; } = string.Empty;
+
+    /// <summary>已存在规范的表号。</summary>
+    public string TableNumber { get; init; } = string.Empty;
+
+    /// <summary>已存在规范的型号或压力等级。</summary>
+    public string PressureRating { get; init; } = string.Empty;
+
+    /// <summary>已存在规范中的有效记录数量。</summary>
+    public int RecordCount { get; init; }
 }

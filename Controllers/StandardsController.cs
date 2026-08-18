@@ -19,6 +19,8 @@ public sealed class StandardsController : ControllerBase
     private readonly StandardManagementCommandService _standardManagementCommandService;
     private readonly ILogger<StandardsController> _logger;
     private readonly StandardImportService _standardImportService;
+    private readonly DynamicStandardPreviewService _dynamicStandardPreviewService;
+    private readonly DynamicStandardImportService _dynamicStandardImportService;
 
     /// <summary>
     /// 创建规范接口控制器。
@@ -28,13 +30,131 @@ public sealed class StandardsController : ControllerBase
         StandardImportService standardImportService,
         StandardManagementQueryService standardManagementQueryService,
         StandardManagementCommandService standardManagementCommandService,
+        DynamicStandardPreviewService dynamicStandardPreviewService,
+        DynamicStandardImportService dynamicStandardImportService,
         ILogger<StandardsController> logger)
     {
         _standardQueryService = standardQueryService ?? throw new ArgumentNullException(nameof(standardQueryService));
         _standardManagementQueryService = standardManagementQueryService ?? throw new ArgumentNullException(nameof(standardManagementQueryService));
         _standardManagementCommandService = standardManagementCommandService ?? throw new ArgumentNullException(nameof(standardManagementCommandService));
         _standardImportService = standardImportService ?? throw new ArgumentNullException(nameof(standardImportService));
+        _dynamicStandardPreviewService = dynamicStandardPreviewService ?? throw new ArgumentNullException(nameof(dynamicStandardPreviewService));
+        _dynamicStandardImportService = dynamicStandardImportService ?? throw new ArgumentNullException(nameof(dynamicStandardImportService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+
+    [HttpPut("management/versions/{versionId:long}/name")]
+    public async Task<ActionResult<StandardManagementOperationResponse>> RenameManagementVersionAsync(
+        long versionId,
+        [FromBody] StandardVersionRenameRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!StandardManagementAuthorization.IsAdministrator(Request, out string operatorName))
+            return StatusCode(StatusCodes.Status403Forbidden, new { success = false, message = "只有 sa、SYSDBA、admin 可以管理规范库。" });
+        try
+        {
+            await _standardManagementCommandService.RenameVersionAsync(versionId, request?.Name ?? string.Empty, operatorName, cancellationToken).ConfigureAwait(false);
+            return Ok(new StandardManagementOperationResponse { Success = true, Message = "规范细分重命名成功。", Id = versionId });
+        }
+        catch (ArgumentException ex) { return BadRequest(new { success = false, message = ex.Message }); }
+        catch (KeyNotFoundException ex) { return NotFound(new { success = false, message = ex.Message }); }
+    }
+
+    [HttpGet("dynamic/versions/{versionId:long}/content")]
+    [ProducesResponseType(typeof(DynamicStandardContentResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<DynamicStandardContentResponse>> GetDynamicContentByVersionAsync(
+        long versionId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            DynamicStandardContentResponse? response = await _standardQueryService
+                .GetDynamicContentByVersionAsync(versionId, cancellationToken)
+                .ConfigureAwait(false);
+            return response == null ? NotFound(new { success = false, message = "该规范版本没有动态内容。" }) : Ok(response);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { success = false, message = ex.Message });
+        }
+    }
+
+    /// <summary>确认动态规范预览并保存为导入批次，不直接发布到具体部件业务表。接口签名保持稳定，基础规范创建参数后续由扩展请求模型承载。</summary>
+    [HttpPost("import/dynamic-commit")]
+    [ProducesResponseType(typeof(DynamicStandardImportCommitResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<DynamicStandardImportCommitResponse>> DynamicCommitImportAsync(
+        [FromBody] DynamicStandardImportCommitRequest request,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("动态确认请求开始。BatchId={BatchId}, SeriesId={SeriesId}, RowCount={RowCount}", request?.BatchId ?? string.Empty, request?.SeriesId ?? 0, request?.Rows?.Count ?? 0);
+        if (request == null)
+            return BadRequest(new { success = false, message = "动态确认请求不能为空。" });
+        if (!StandardManagementAuthorization.IsAdministrator(Request, out string operatorName))
+        {
+            _logger.LogWarning("动态确认请求被拒绝：操作者不是管理员。BatchId={BatchId}", request?.BatchId ?? string.Empty);
+            return StatusCode(StatusCodes.Status403Forbidden, new { success = false, message = "只有 sa、SYSDBA、admin 可以导入动态规范。" });
+        }
+
+        try
+        {
+            return Ok(await _dynamicStandardImportService.CommitAsync(request, operatorName, cancellationToken).ConfigureAwait(false));
+        }
+        catch (ArgumentException ex) { return BadRequest(new { success = false, message = ex.Message }); }
+        catch (KeyNotFoundException ex) { _logger.LogWarning(ex, "动态确认目标资源不存在。BatchId={BatchId}", request?.BatchId ?? string.Empty); return NotFound(new { success = false, message = ex.Message }); }
+        catch (InvalidOperationException ex) { _logger.LogWarning(ex, "动态确认批次状态冲突。BatchId={BatchId}", request?.BatchId ?? string.Empty); return Conflict(new { success = false, message = ex.Message }); }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "动态确认请求发生未处理异常。BatchId={BatchId}, SeriesId={SeriesId}", request?.BatchId ?? string.Empty, request?.SeriesId ?? 0);
+            string detail = HttpContext.RequestServices.GetRequiredService<IHostEnvironment>().IsDevelopment()
+                ? ex.GetBaseException().Message
+                : "动态规范确认失败，请查看服务器日志。";
+            return StatusCode(StatusCodes.Status500InternalServerError, new { success = false, message = detail });
+        }
+    }
+
+    /// <summary>按数据库模板预览任意 Excel 表头，不写入规范数据。</summary>
+    [HttpPost("import/dynamic-preview")]
+    [ProducesResponseType(typeof(DynamicStandardPreviewResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<DynamicStandardPreviewResponse>> DynamicPreviewImportAsync(IFormFile file, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("动态预览请求开始。FileName={FileName}, FileLength={FileLength}", file?.FileName ?? string.Empty, file?.Length ?? 0);
+        if (file == null || file.Length == 0) return BadRequest(new { success = false, message = "请上传非空 Excel 文件。" });
+        if (!string.Equals(Path.GetExtension(file.FileName), ".xlsx", StringComparison.OrdinalIgnoreCase)) return BadRequest(new { success = false, message = "动态预览当前只支持 .xlsx 文件。" });
+        try
+        {
+            await using Stream stream = file.OpenReadStream();
+            return Ok(await _dynamicStandardPreviewService.PreviewAsync(stream, file.FileName, cancellationToken).ConfigureAwait(false));
+        }
+        catch (InvalidDataException ex) { return BadRequest(new { success = false, message = ex.Message }); }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "动态规范预览失败。FileName={FileName}, FileLength={FileLength}, ContentType={ContentType}", file.FileName, file.Length, file.ContentType ?? string.Empty);
+            string databaseType = HttpContext.RequestServices.GetRequiredService<IConfiguration>()["Database:Type"] ?? "DM";
+            string message = string.Equals(databaseType, "DM", StringComparison.OrdinalIgnoreCase)
+                ? "动态规范预览失败（达梦数据库）。请检查模板表是否已在配置 Schema 中创建，并查看服务器日志中的 SQL 异常。"
+                : "动态规范预览失败，请查看服务器日志。";
+            return StatusCode(StatusCodes.Status500InternalServerError, new { success = false, message });
+        }
+    }
+
+    /// <summary>查询动态规范系列当前版本的原始字段内容。</summary>
+    [HttpGet("dynamic/series/{seriesId:long}/content")]
+    [ProducesResponseType(typeof(DynamicStandardContentResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<DynamicStandardContentResponse>> GetDynamicContentAsync(
+        long seriesId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            DynamicStandardContentResponse? response = await _standardQueryService
+                .GetDynamicContentAsync(seriesId, cancellationToken)
+                .ConfigureAwait(false);
+            return response == null ? NotFound(new { success = false, message = "该规范系列没有动态版本内容。" }) : Ok(response);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { success = false, message = ex.Message });
+        }
     }
 
     [HttpPost("management/series/{seriesId:long}/move")]
@@ -282,6 +402,31 @@ public sealed class StandardsController : ControllerBase
     }
 
     /// <summary>
+    /// 按规范身份键精确定位规范系列及当前版本。
+    /// 请求：POST /api/standards/management/identity/resolve
+    /// </summary>
+    [HttpPost("management/identity/resolve")]
+    [ProducesResponseType(typeof(StandardIdentityResolveResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<StandardIdentityResolveResponse>> ResolveStandardIdentityAsync(
+        [FromBody] StandardIdentityResolveRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            StandardIdentityResolveResponse response = await _standardManagementQueryService
+                .ResolveIdentityAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+            return Ok(response);
+        }
+        catch (ArgumentException ex)
+        {
+            _logger.LogWarning(ex, "规范身份定位参数无效。FamilyCode={FamilyCode}, SeriesCode={SeriesCode}", request?.FamilyCode, request?.SeriesCode);
+            return BadRequest(new { success = false, message = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// 软删除规范版本。
     /// </summary>
     [HttpDelete("management/versions/{versionId:long}")]
@@ -464,7 +609,7 @@ public sealed class StandardsController : ControllerBase
         {
             await using Stream stream = file.OpenReadStream();
             StandardImportPreviewResponse response = await _standardImportService
-                .PreviewJsonAsync(stream, cancellationToken)
+                .PreviewJsonAsync(stream, file.FileName, cancellationToken)
                 .ConfigureAwait(false);
             return Ok(response);
         }
@@ -527,7 +672,7 @@ public sealed class StandardsController : ControllerBase
 
             await using Stream stream = file.OpenReadStream();
             StandardImportPreviewResponse response = await _standardImportService
-                .PreviewAsync(stream, series, cancellationToken)
+                .PreviewAsync(stream, series, file.FileName, cancellationToken)
                 .ConfigureAwait(false);
             return Ok(response);
         }
@@ -547,21 +692,33 @@ public sealed class StandardsController : ControllerBase
     }
 
     /// <summary>
-    /// 确认 Excel 预览批次并导入数据库。
-    /// 请求：POST /api/standards/import/commit?batchId=...&allowWarnings=false
+    /// 确认预览批次并导入数据库。
+    /// 请求体包含用户最终确认的规范元数据和重名处理策略。
     /// </summary>
     [HttpPost("import/commit")]
     [ProducesResponseType(typeof(StandardImportCommitResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<StandardImportCommitResponse>> CommitImportAsync(
-        [FromQuery] string batchId,
-        [FromQuery] bool allowWarnings,
+        [FromBody] StandardImportCommitRequest request,
         CancellationToken cancellationToken)
     {
+        if (!StandardManagementAuthorization.IsAdministrator(Request, out string operatorName))
+            return StatusCode(StatusCodes.Status403Forbidden, new { success = false, message = "只有 sa、SYSDBA、admin 可以导入规范。" });
+
         try
         {
+            _logger.LogInformation(
+                "收到规范导入确认请求。BatchId={BatchId}, Operator={OperatorName}, Strategy={Strategy}, SeriesName={SeriesName}, StandardNumber={StandardNumber}, TableNumber={TableNumber}, PressureRating={PressureRating}, AllowWarnings={AllowWarnings}",
+                request?.BatchId,
+                operatorName,
+                request?.DuplicateStrategy,
+                request?.Series?.SeriesName,
+                request?.Series?.StandardNumber,
+                request?.Series?.TableNumber,
+                request?.Series?.PressureRating,
+                request?.AllowWarnings);
             StandardImportCommitResponse response = await _standardImportService
-                .CommitAsync(batchId, allowWarnings, cancellationToken)
+                .CommitAsync(request ?? throw new ArgumentNullException(nameof(request)), operatorName, cancellationToken)
                 .ConfigureAwait(false);
             return Ok(response);
         }
@@ -583,8 +740,8 @@ public sealed class StandardsController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "规范 Excel 确认导入失败。BatchId={BatchId}", batchId);
+            _logger.LogError(ex, "规范确认导入失败。BatchId={BatchId}", request?.BatchId);
             return StatusCode(StatusCodes.Status500InternalServerError, new { success = false, message = "规范数据导入失败，请查看服务器日志。" });
-    }
+        }
     }
 }

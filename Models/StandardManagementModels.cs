@@ -14,12 +14,34 @@ public sealed class StandardManagementCategoryDto
 }
 
 /// <summary>
+/// 基础规范号实体。一个基础规范号可以包含多个规范细分系列。
+/// </summary>
+public sealed class StandardDocumentDto
+{
+    /// <summary>基础规范唯一标识。</summary>
+    public long Id { get; init; }
+    /// <summary>所属专业编码。</summary>
+    public string FamilyCode { get; init; } = string.Empty;
+    /// <summary>所属目录分类。</summary>
+    public long? CategoryId { get; init; }
+    /// <summary>规范号，例如 GB/T 9124.1-2019。</summary>
+    public string StandardNumber { get; init; } = string.Empty;
+    /// <summary>规范名称，可为空。</summary>
+    public string StandardName { get; init; } = string.Empty;
+    /// <summary>是否启用。</summary>
+    public bool IsActive { get; init; }
+}
+
+/// <summary>
 /// 规范系列及其基本元数据。
 /// </summary>
 public sealed class StandardManagementSeriesDto
 {
     public long Id { get; init; }
     public long? CategoryId { get; init; }
+    /// <summary>所属基础规范号记录的 ID。</summary>
+    public long? StandardDocumentId { get; init; }
+    public string FamilyCode { get; init; } = string.Empty;
     public string SeriesCode { get; init; } = string.Empty;
     public string SeriesName { get; init; } = string.Empty;
     public string StandardNumber { get; init; } = string.Empty;
@@ -70,6 +92,7 @@ public sealed class StandardManagementTreeResponse
     public bool Success { get; init; }
     public string Message { get; init; } = string.Empty;
     public IReadOnlyList<StandardManagementCategoryDto> Categories { get; init; } = Array.Empty<StandardManagementCategoryDto>();
+    public IReadOnlyList<StandardDocumentDto> Documents { get; init; } = Array.Empty<StandardDocumentDto>();
     public IReadOnlyList<StandardManagementSeriesDto> Series { get; init; } = Array.Empty<StandardManagementSeriesDto>();
 }
 

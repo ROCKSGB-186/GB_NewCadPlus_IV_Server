@@ -13,10 +13,42 @@ public sealed class StandardCategoryCommandRequest
     public int SortOrder { get; init; }
 }
 
+/// <summary>
+/// 修改规范版本显示名称的请求参数。
+/// </summary>
+public sealed class StandardVersionRenameRequest
+{
+    public string Name { get; init; } = string.Empty;
+}
+
 public sealed class StandardImportCommitRequest
 {
+    /// <summary>预览接口返回的临时批次标识。</summary>
     public string BatchId { get; init; } = string.Empty;
+
+    /// <summary>用户是否已核对并接受预览警告。</summary>
     public bool AllowWarnings { get; init; }
+
+    /// <summary>用户在预览页面最终确认的规范元数据。</summary>
+    public StandardSeriesDto Series { get; init; } = new();
+
+    /// <summary>预览命中已有规范时的用户处理意图。</summary>
+    public StandardImportDuplicateStrategy DuplicateStrategy { get; init; } = StandardImportDuplicateStrategy.NewImport;
+}
+
+/// <summary>
+/// 同一规范已存在时的导入处理意图。
+/// </summary>
+public enum StandardImportDuplicateStrategy
+{
+    /// <summary>仅允许导入未命中已有规范的新规范。</summary>
+    NewImport = 0,
+
+    /// <summary>请求创建新版本；需完成法兰记录版本快照后才能启用。</summary>
+    CreateVersion = 1,
+
+    /// <summary>请求覆盖当前数据；需完成版本快照和恢复能力后才能启用。</summary>
+    OverwriteCurrent = 2
 }
 
 /// <summary>

@@ -26,6 +26,30 @@ public sealed class StandardManagementCommandService
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
+    /// <summary>
+    /// 修改动态规范细分的显示名称，不修改版本号和动态内容。
+    /// </summary>
+    public async Task RenameVersionAsync(long versionId, string name, string operatorName, CancellationToken cancellationToken = default)
+    {
+        if (versionId <= 0) throw new ArgumentException("规范版本 ID 必须大于 0。", nameof(versionId));
+        if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("规范版本名称不能为空。", nameof(name));
+        if (string.IsNullOrWhiteSpace(operatorName)) throw new ArgumentException("操作用户名不能为空。", nameof(operatorName));
+
+        string databaseType = GetDatabaseType();
+        string schema = GetSchemaName();
+        string table = databaseType == "DM" ? $"{schema}.STANDARD_DOCUMENT_VERSIONS" : "standard_document_versions";
+        string p = databaseType == "DM" ? ":" : "@";
+        await using DbConnection connection = await OpenConnectionAsync(databaseType, cancellationToken).ConfigureAwait(false);
+        int affected = await connection.ExecuteAsync(new CommandDefinition(
+            $"UPDATE {table} SET VERSION_LABEL={p}Name,UPDATED_AT=CURRENT_TIMESTAMP WHERE ID={p}Id AND IS_DELETED=0 AND SOURCE_TYPE='DYNAMIC_IMPORT'",
+            new { Id = versionId, Name = name.Trim() }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        if (affected == 0)
+            throw new KeyNotFoundException("动态规范细分不存在、已删除或不允许重命名。");
+
+        _logger.LogInformation("动态规范细分重命名成功：VersionId={VersionId}, Name={Name}, Operator={OperatorName}", versionId, name.Trim(), operatorName);
+    }
+
     public async Task MoveSeriesAsync(
         long seriesId,
         long categoryId,

@@ -45,7 +45,13 @@ builder.Services.AddScoped<PipelineCatalogService>();
 builder.Services.AddScoped<PipelineDesignStandardService>();
 
 // 注册规范资料管理查询服务，目录和版本元数据统一由服务器读取。
-builder.Services.AddScoped<StandardManagementQueryService>();
+// 该查询服务同时被单例导入预览批次使用，因此注册为单例；服务本身只依赖配置和日志，不持有请求级状态。
+builder.Services.AddSingleton<StandardManagementQueryService>();
+
+// 注册模板查询和动态 Excel 预览服务；只读预览不影响既有法兰导入写库流程。
+builder.Services.AddScoped<StandardTemplateQueryService>();
+builder.Services.AddScoped<DynamicStandardPreviewService>();
+builder.Services.AddScoped<DynamicStandardImportService>();
 
 // 注册规范管理写入服务，统一处理版本、附件和状态变更。
 builder.Services.AddScoped<StandardManagementCommandService>();

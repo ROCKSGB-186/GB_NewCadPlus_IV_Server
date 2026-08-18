@@ -1,6 +1,7 @@
--- GB 设计规范资料管理扩展：达梦版本
--- 说明：对象统一创建到服务配置中的 Database:Schema（默认 CAD_SW_LIBRARY）。
--- 本脚本只新增目录、版本、附件和操作日志表，不修改现有规范查询表。
+-- GB 设计规范资料管理扩展：达梦版本。
+-- 固定目标库/Schema：CAD_SW_LIBRARY。
+-- 本文件中的每一张表、约束和索引均使用 CAD_SW_LIBRARY 全限定名称。
+-- 本脚本依赖 standard_schema_dm.sql 已经成功执行。
 
 CREATE TABLE CAD_SW_LIBRARY.STANDARD_CATEGORIES (
 	ID BIGINT NOT NULL,
