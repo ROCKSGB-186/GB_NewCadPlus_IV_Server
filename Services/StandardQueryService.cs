@@ -6,6 +6,7 @@ using System.Data.Common;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace GB_NewCadPlus_IV.UploadApi.Services;
 
@@ -15,12 +16,20 @@ namespace GB_NewCadPlus_IV.UploadApi.Services;
 /// </summary>
 public sealed class StandardQueryService
 {
+    /// <summary>
+    /// 配置对象。
+    /// </summary>
     private readonly IConfiguration _configuration;
+    /// <summary>
+    /// 日志记录器。
+    /// </summary>
     private readonly ILogger<StandardQueryService> _logger;
 
     /// <summary>
     /// 创建规范查询服务。
     /// </summary>
+    /// <param name="configuration">配置对象。</param>
+    /// <param name="logger">日志记录器。</param>
     public StandardQueryService(IConfiguration configuration, ILogger<StandardQueryService> logger)
     {
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
@@ -39,7 +48,7 @@ public sealed class StandardQueryService
         string familyCode = NormalizeCode(request.FamilyCode);
         string seriesCode = NormalizeCode(request.SeriesCode);
         string dn = NormalizeDn(request.DN);
-        string pn = NormalizeCode(request.PN);
+        string pn = NormalizePn(request.PN);
 
         _logger.LogInformation(
             "收到匹配请求：FamilyCode={FamilyCode}, SeriesCode={SeriesCode}, StandardNumber={StandardNumber}, TableNumber={TableNumber}, DN={DN}, PN={PN}, Series={Series}, FlangeType={FlangeType}, FaceType={FaceType}",
@@ -56,11 +65,6 @@ public sealed class StandardQueryService
         if (familyCode != "FLANGE")
         {
             throw new ArgumentException("第一阶段只支持 FLANGE 法兰规范查询。", nameof(request));
-        }
-
-        if (string.IsNullOrWhiteSpace(seriesCode))
-        {
-            throw new ArgumentException("规范系列编码不能为空。", nameof(request));
         }
 
         if (string.IsNullOrWhiteSpace(dn))
@@ -108,15 +112,18 @@ public sealed class StandardQueryService
             if (data == null)
             {
                 _logger.LogWarning(
-                    "数据库未命中：FamilyCode={FamilyCode}, SeriesCode={SeriesCode}, DN={DN}, PN={PN}",
+                    "数据库未命中：FamilyCode={FamilyCode}, SeriesCode={SeriesCode}, StandardNumber={StandardNumber}, DN={DN}, PN={PN}",
                     familyCode,
                     seriesCode,
+                    NormalizeOptional(request.StandardNumber) ?? "(空)",
                     dn,
                     pn);
                 return new StandardMatchResponse
                 {
                     Success = false,
-                    Message = $"未找到法兰规范：系列={seriesCode}，DN={dn}，PN={pn}。",
+                    Message = string.IsNullOrWhiteSpace(seriesCode)
+                        ? $"未找到法兰规范：标准号={NormalizeOptional(request.StandardNumber) ?? "(空)"}，DN={dn}，PN={pn}。"
+                        : $"未找到法兰规范：系列={seriesCode}，DN={dn}，PN={pn}。",
                     MatchCount = 0,
                     IsUniqueMatch = false
                 };
@@ -318,11 +325,29 @@ public sealed class StandardQueryService
     /// </summary>
     private sealed class DynamicContentRow
     {
+        /// <summary>
+        /// 规范系列 ID。
+        /// </summary>
         public long SeriesId { get; init; }
+        /// <summary>
+        /// 规范版本 ID。
+        /// </summary>
         public long VersionId { get; init; }
+        /// <summary>
+        /// 规范版本号。
+        /// </summary>
         public string VersionNo { get; init; } = string.Empty;
+        /// <summary>
+        /// 规范版本标签。
+        /// </summary>
         public string VersionLabel { get; init; } = string.Empty;
+        /// <summary>
+        /// 行号。
+        /// </summary>
         public int RowNumber { get; init; }
+        /// <summary>
+        /// 值的 JSON 表示。
+        /// </summary>
         public string ValuesJson { get; init; } = "{}";
     }
     /// <summary>
@@ -380,16 +405,9 @@ FROM standard_flange_records sfr
 INNER JOIN standard_series ss ON ss.id = sfr.series_id AND ss.is_active = 1
 INNER JOIN standard_families sf ON sf.id = ss.family_id AND sf.is_active = 1
 WHERE sf.code = @FamilyCode
-  AND ss.series_code = @SeriesCode
-  AND sfr.dn = @DN
   AND sfr.dn_value = @DNValue
-  AND sfr.pn = @PN
-  AND (@StandardNumber IS NULL OR ss.standard_number = @StandardNumber)
-  AND (@TableNumber IS NULL OR ss.table_number = @TableNumber)
-  AND (@FlangeType IS NULL OR ss.flange_type = @FlangeType)
-  AND (@FaceType IS NULL OR ss.face_type = @FaceType)
   AND sfr.is_active = 1
-LIMIT 1";
+";
 
         Stopwatch stopwatch = Stopwatch.StartNew();
         _logger.LogInformation(
@@ -403,27 +421,21 @@ LIMIT 1";
         await using var connection = new MySqlConnection(GetConnectionString("MYSQL"));
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("MySQL 数据库连接已打开。");
-        StandardMatchRow? row = await connection.QuerySingleOrDefaultAsync<StandardMatchRow>(
+        IEnumerable<StandardMatchRow> rows = await connection.QueryAsync<StandardMatchRow>(
             new CommandDefinition(sql, new
             {
                 FamilyCode = familyCode,
-                SeriesCode = seriesCode,
-                DN = dn,
-                DNValue = dnValue,
-                PN = pn,
-                StandardNumber = NormalizeOptional(request.StandardNumber),
-                TableNumber = NormalizeOptional(request.TableNumber),
-                FlangeType = NormalizeOptional(request.FlangeType),
-                FaceType = NormalizeOptional(request.FaceType)
+                SeriesCode = NormalizeOptional(seriesCode),
+                DNValue = dnValue
             }, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         stopwatch.Stop();
         _logger.LogInformation(
             "MySQL 查询完成：是否命中={Matched}, 耗时Ms={ElapsedMilliseconds}",
-            row != null,
+            rows.Any(),
             stopwatch.ElapsedMilliseconds);
 
-        return row == null ? null : ToMatchData(row);
+        return SelectBestStaticMatch(rows, request, pn);
     }
 
     /// <summary>
@@ -476,65 +488,122 @@ LIMIT 1";
             ? new DmConnection(GetConnectionString("DM"))
             : new MySqlConnection(GetConnectionString("MYSQL"));
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        string? requestedStandardNumber = NormalizeOptional(request.StandardNumber);
+        string requestedStandardForOrder = NormalizeStandardNumber(request.StandardNumber) ?? string.Empty;
         IEnumerable<DynamicMatchRow> rows = await connection.QueryAsync<DynamicMatchRow>(
             new CommandDefinition(sql, new
             {
                 FamilyCode = familyCode,
-                SeriesCode = seriesCode,
-                StandardNumber = requestedStandardNumber ?? string.Empty
+                 SeriesCode = NormalizeOptional(seriesCode),
+                StandardNumber = requestedStandardForOrder
             }, cancellationToken: cancellationToken))
             .ConfigureAwait(false);
 
         int rowCount = 0;
         int dnMatchCount = 0;
         int pnMatchCount = 0;
+        StandardMatchData? bestMatch = null;
+        int bestScore = int.MinValue;
+        string? requestedStandardNumber = NormalizeStandardNumber(request.StandardNumber);
+        string? requestedTableNumber = NormalizeMatchOptional(request.TableNumber);
+        string? requestedFlangeType = NormalizeMatchOptional(request.FlangeType);
+        string? requestedFaceType = NormalizeMatchOptional(request.FaceType);
+        string? requestedSeriesCode = NormalizeMatchOptional(request.SeriesCode);
         foreach (DynamicMatchRow row in rows)
         {
             rowCount++;
             Dictionary<string, string> values = DeserializeDictionary(row.ValuesJson);
             string rowDn = NormalizeDn(GetDynamicValue(values,
                 "DN", "DNValue", "DN值", "公称通径", "公称直径"));
-            string rowPn = GetDynamicValue(values,
-                "PN", "PNValue", "PN值", "公称压力", "压力等级");
-            if (string.Equals(rowDn, dn, StringComparison.OrdinalIgnoreCase))
+            string rowPn = NormalizePn(GetDynamicValue(values,
+                "PN", "PNValue", "PN值", "公称压力", "压力等级"));
+            if (DiameterEquals(rowDn, dn))
                 dnMatchCount++;
 
-            if (!string.Equals(rowDn, dn, StringComparison.OrdinalIgnoreCase)
+            if (!DiameterEquals(rowDn, dn)
                 || !PressureEquals(rowPn, pn))
             {
                 continue;
             }
             pnMatchCount++;
 
-            string? standardNumber = NormalizeOptional(request.StandardNumber);
-            if (standardNumber != null
-                && !string.Equals(NormalizeCode(row.StandardNumber), standardNumber, StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(NormalizeCode(GetDynamicValue(values, "StandardNumber", "标准号", "STANDARD_NO")), standardNumber, StringComparison.OrdinalIgnoreCase))
+            _logger.LogInformation(
+                "动态规范 DN/PN 候选命中：SeriesId={SeriesId}, RowNumber={RowNumber}, RawDN={RawDN}, RawPN={RawPN}, NormalizedDN={NormalizedDN}, NormalizedPN={NormalizedPN}, Keys={Keys}",
+                row.SeriesId,
+                row.SourceRowNumber,
+                GetDynamicValue(values, "DN", "DNValue", "DN值", "公称通径", "公称直径"),
+                GetDynamicValue(values, "PN", "PNValue", "PN值", "公称压力", "压力等级"),
+                rowDn,
+                rowPn,
+                string.Join(",", values.Keys));
+
+            string rowStandardNumber = NormalizeStandardNumber(row.StandardNumber) ?? string.Empty;
+            string valueStandardNumber = NormalizeStandardNumber(GetDynamicValue(values, "StandardNumber", "标准号", "STANDARD_NO")) ?? string.Empty;
+            if (requestedStandardNumber != null
+                && rowStandardNumber != requestedStandardNumber
+                && valueStandardNumber != requestedStandardNumber)
             {
                 continue;
             }
 
-            string? tableNumber = NormalizeOptional(request.TableNumber);
-            if (tableNumber != null
-                && !string.Equals(NormalizeCode(row.TableNumber), tableNumber, StringComparison.OrdinalIgnoreCase))
+            string rowTableNumber = NormalizeMatchText(row.TableNumber);
+            string valueTableNumber = NormalizeMatchText(GetDynamicValue(values, "TableNumber", "表号", "TABLE_NUMBER"));
+            if (requestedTableNumber != null
+                && rowTableNumber != requestedTableNumber
+                && valueTableNumber != requestedTableNumber)
+            {
+                continue;
+            }
+
+            string rowFlangeType = NormalizeMatchText(row.FlangeType);
+            string valueFlangeType = NormalizeMatchText(GetDynamicValue(values, "FlangeType", "法兰类型", "FLG_TYPE"));
+            if (requestedFlangeType != null
+                && rowFlangeType != requestedFlangeType
+                && valueFlangeType != requestedFlangeType)
+            {
+                continue;
+            }
+
+            string rowFaceType = NormalizeMatchText(row.FaceType);
+            string valueFaceType = NormalizeMatchText(GetDynamicValue(values, "FaceType", "密封面形式", "密封面型式", "FACE_TYPE"));
+            if (requestedFaceType != null
+                && rowFaceType != requestedFaceType
+                && valueFaceType != requestedFaceType)
             {
                 continue;
             }
 
             FlangeStandardRecordDto record = ToDynamicRecord(row, values, dn, dnValue, rowPn);
+            int score = 0;
+            if (requestedSeriesCode != null && NormalizeMatchText(row.SeriesCode) == requestedSeriesCode) score += 8;
+            if (requestedStandardNumber != null && (rowStandardNumber == requestedStandardNumber || valueStandardNumber == requestedStandardNumber)) score += 4;
+            if (requestedTableNumber != null && (rowTableNumber == requestedTableNumber || valueTableNumber == requestedTableNumber)) score += 2;
+            if (requestedFlangeType != null && (rowFlangeType == requestedFlangeType || valueFlangeType == requestedFlangeType)) score += 1;
+            if (requestedFaceType != null && (rowFaceType == requestedFaceType || valueFaceType == requestedFaceType)) score += 1;
+
+            if (score < bestScore)
+            {
+                continue;
+            }
+
             _logger.LogInformation(
                 "动态规范数据库命中：SeriesId={SeriesId}, RowNumber={RowNumber}, DN={DN}, PN={PN}",
                 row.SeriesId, row.SourceRowNumber, dn, rowPn);
-            return new StandardMatchData(ToDynamicSeries(row), record);
+            bestScore = score;
+            bestMatch = new StandardMatchData(ToDynamicSeries(row), record);
         }
 
         _logger.LogInformation(
-            "动态规范数据库未命中：FamilyCode={FamilyCode}, RequestedSeriesCode={SeriesCode}, DN={DN}, PN={PN}, DynamicRowCount={RowCount}, DNMatchCount={DNMatchCount}, DNPNMatchCount={PNMatchCount}",
-            familyCode, seriesCode, dn, pn, rowCount, dnMatchCount, pnMatchCount);
-        return null;
+            bestMatch == null
+                ? "动态规范数据库未命中：FamilyCode={FamilyCode}, RequestedSeriesCode={SeriesCode}, DN={DN}, PN={PN}, DynamicRowCount={RowCount}, DNMatchCount={DNMatchCount}, DNPNMatchCount={PNMatchCount}"
+                : "动态规范数据库匹配完成：FamilyCode={FamilyCode}, RequestedSeriesCode={SeriesCode}, DN={DN}, PN={PN}, DynamicRowCount={RowCount}, DNMatchCount={DNMatchCount}, DNPNMatchCount={PNMatchCount}, BestScore={BestScore}",
+            familyCode, seriesCode, dn, pn, rowCount, dnMatchCount, pnMatchCount, bestScore);
+        return bestMatch;
     }
-
+    /// <summary>
+    /// 将动态规范行转换为标准系列数据。
+    /// </summary>
+    /// <param name="row">动态规范行。</param>
+    /// <returns>标准系列数据。</returns>
     private static StandardSeriesData ToDynamicSeries(DynamicMatchRow row) => new()
     {
         Id = row.SeriesId,
@@ -548,35 +617,48 @@ LIMIT 1";
         FlangeType = row.FlangeType,
         FaceType = row.FaceType
     };
-
+    /// <summary>
+    /// 将动态规范行和其值字典转换为法兰规范记录数据。
+    /// </summary>
+    /// <param name="row">动态规范行。</param>
+    /// <param name="values">值字典。</param>
+    /// <param name="dn">公称直径。</param>
+    /// <param name="dnValue">公称直径值。</param>
+    /// <param name="pn">公称压力。</param>
+    /// <returns>法兰规范记录数据。</returns>
     private static FlangeStandardRecordDto ToDynamicRecord(
         DynamicMatchRow row,
         Dictionary<string, string> values,
         string dn,
         int dnValue,
         string pn) => new()
-    {
-        Id = row.SeriesId * 1000000 + row.SourceRowNumber,
-        SeriesId = row.SeriesId,
-        SourceRowNumber = row.SourceRowNumber,
-        DN = dn,
-        DNValue = dnValue,
-        PN = pn,
-        PipeOuterDiameterSeriesI = ParseDecimal(GetDynamicValue(values, "PipeOuterDiameterSeriesI")),
-        PipeOuterDiameterSeriesII = ParseDecimal(GetDynamicValue(values, "PipeOuterDiameterSeriesII")),
-        FlangeOuterDiameter = ParseDecimal(GetDynamicValue(values, "FlangeOuterDiameter")),
-        BoltCircleDiameter = ParseDecimal(GetDynamicValue(values, "BoltCircleDiameter")),
-        BoltHoleDiameter = ParseDecimal(GetDynamicValue(values, "BoltHoleDiameter")),
-        BoltCount = ParseInt(GetDynamicValue(values, "BoltCount")),
-        BoltSpecification = GetDynamicValue(values, "BoltSpecification"),
-        BoltRawSuffix = GetDynamicValue(values, "BoltRawSuffix"),
-        FlangeThickness = ParseDecimal(GetDynamicValue(values, "FlangeThickness")),
-        RaisedFaceHeight = ParseDecimal(GetDynamicValue(values, "RaisedFaceHeight")),
-        FlangeInnerDiameterSeriesI = ParseDecimal(GetDynamicValue(values, "FlangeInnerDiameterSeriesI")),
-        FlangeInnerDiameterSeriesII = ParseDecimal(GetDynamicValue(values, "FlangeInnerDiameterSeriesII")),
-        RawValues = values
-    };
-
+        {
+            Id = row.SeriesId * 1000000 + row.SourceRowNumber,
+            SeriesId = row.SeriesId,
+            SourceRowNumber = row.SourceRowNumber,
+            DN = dn,
+            DNValue = dnValue,
+            PN = pn,
+            PipeOuterDiameterSeriesI = ParseDecimal(GetDynamicValue(values, "PipeOuterDiameterSeriesI")),
+            PipeOuterDiameterSeriesII = ParseDecimal(GetDynamicValue(values, "PipeOuterDiameterSeriesII")),
+            FlangeOuterDiameter = ParseDecimal(GetDynamicValue(values, "FlangeOuterDiameter")),
+            BoltCircleDiameter = ParseDecimal(GetDynamicValue(values, "BoltCircleDiameter")),
+            BoltHoleDiameter = ParseDecimal(GetDynamicValue(values, "BoltHoleDiameter")),
+            BoltCount = ParseInt(GetDynamicValue(values, "BoltCount")),
+            BoltSpecification = GetDynamicValue(values, "BoltSpecification"),
+            BoltRawSuffix = GetDynamicValue(values, "BoltRawSuffix"),
+            FlangeThickness = ParseDecimal(GetDynamicValue(values, "FlangeThickness")),
+            RaisedFaceHeight = ParseDecimal(GetDynamicValue(values, "RaisedFaceHeight")),
+            FlangeInnerDiameterSeriesI = ParseDecimal(GetDynamicValue(values, "FlangeInnerDiameterSeriesI")),
+            FlangeInnerDiameterSeriesII = ParseDecimal(GetDynamicValue(values, "FlangeInnerDiameterSeriesII")),
+            RawValues = values
+        };
+    /// <summary>
+    /// 从动态规范的值字典中获取指定名称的值，按顺序尝试多个名称，返回第一个非空值。
+    /// </summary>
+    /// <param name="values">值字典。</param>
+    /// <param name="names">要获取的值的名称列表。</param>
+    /// <returns>第一个非空值，如果没有找到则返回空字符串。</returns>
     private static string GetDynamicValue(Dictionary<string, string> values, params string[] names)
     {
         foreach (string name in names)
@@ -589,42 +671,124 @@ LIMIT 1";
 
         return string.Empty;
     }
+    /// <summary>
+    /// 规范化动态规范的键名，移除下划线和空格，并转换为大写。
+    /// </summary>
+    /// <param name="value">要规范化的键名。</param>
+    /// <returns>规范化后的键名。</returns>
+    private static string NormalizeDynamicKey(string value)
+    {
+        string source = (value ?? string.Empty).Trim();
 
-    private static string NormalizeDynamicKey(string value) =>
-        (value ?? string.Empty).Replace("_", string.Empty).Replace(" ", string.Empty).Trim().ToUpperInvariant();
+        // 只移除由动态导入器追加的“下划线 + 列序号”，不能无条件删除末尾数字。
+        // 例如 DN_1 应映射为 DN；而业务字段名 FIELD1 必须仍保留为 FIELD1。
+        source = Regex.Replace(source, @"_\d+$", string.Empty, RegexOptions.CultureInvariant);
 
+        return source
+            .Replace("_", string.Empty)
+            .Replace(" ", string.Empty)
+            .ToUpperInvariant();
+    }
+    /// <summary>
+    /// 判断两个公称压力字符串是否表示相同的数值，忽略前缀 "PN"。
+    /// </summary>
+    /// <param name="left">左侧公称压力字符串。</param>
+    /// <param name="right">右侧公称压力字符串。</param>
+    /// <returns>如果表示相同的数值则返回 true，否则返回 false。</returns>
     private static bool PressureEquals(string left, string right)
     {
-        string normalizedLeft = NormalizeCode(left).Replace("PN", string.Empty);
-        string normalizedRight = NormalizeCode(right).Replace("PN", string.Empty);
+        string normalizedLeft = NormalizeMatchText(left).Replace("PN", string.Empty, StringComparison.Ordinal);
+        string normalizedRight = NormalizeMatchText(right).Replace("PN", string.Empty, StringComparison.Ordinal);
         return decimal.TryParse(normalizedLeft, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal leftValue)
             && decimal.TryParse(normalizedRight, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal rightValue)
             && leftValue == rightValue;
     }
-
+    /// <summary>
+    /// 判断两个公称直径字符串是否表示相同的数值，忽略前缀 "DN"。
+    /// </summary>
+    /// <param name="left">左侧公称直径字符串。</param>
+    /// <param name="right">右侧公称直径字符串。</param>
+    /// <returns>如果表示相同的数值则返回 true，否则返回 false。</returns>
+    private static bool DiameterEquals(string left, string right)
+    {
+        string normalizedLeft = NormalizeMatchText(left).Replace("DN", string.Empty, StringComparison.Ordinal);
+        string normalizedRight = NormalizeMatchText(right).Replace("DN", string.Empty, StringComparison.Ordinal);
+        return int.TryParse(normalizedLeft, NumberStyles.Integer, CultureInfo.InvariantCulture, out int leftValue)
+            && int.TryParse(normalizedRight, NumberStyles.Integer, CultureInfo.InvariantCulture, out int rightValue)
+            && leftValue == rightValue;
+    }
+    /// <summary>
+    /// 尝试将字符串解析为 decimal 类型，如果解析失败则返回 null。
+    /// </summary>
+    /// <param name="value">要解析的字符串值。</param>
+    /// <returns>解析成功则返回 decimal 值，否则返回 null。</returns>
     private static decimal? ParseDecimal(string value) =>
         decimal.TryParse((value ?? string.Empty).Trim(), NumberStyles.Number, CultureInfo.InvariantCulture, out decimal result)
             ? result
             : null;
 
+    /// <summary>
+    /// 尝试将字符串解析为 int 类型，如果解析失败则返回 null。
+    /// </summary>
+    /// <param name="value">要解析的字符串值。</param>
+    /// <returns>解析成功则返回 int 值，否则返回 null。</returns>
     private static int? ParseInt(string value) =>
         int.TryParse((value ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int result)
             ? result
             : null;
-
+    
+    /// <summary>
+    /// 表示动态匹配行的数据结构。
+    /// </summary>
     private sealed class DynamicMatchRow
     {
+        /// <summary>
+        /// 规范系列 ID。
+        /// </summary>
         public long SeriesId { get; init; }
+        /// <summary>
+        /// 规范系列的家族代码。
+        /// </summary>
         public string FamilyCode { get; init; } = string.Empty;
+        /// <summary>
+        /// 规范系列的家族名称。
+        /// </summary>
         public string FamilyName { get; init; } = string.Empty;
+        /// <summary>
+        /// 规范系列代码。
+        /// </summary>
         public string SeriesCode { get; init; } = string.Empty;
+        /// <summary>
+        /// 规范系列名称。
+        /// </summary>
         public string SeriesName { get; init; } = string.Empty;
+        /// <summary>
+        /// 标准编号。
+        /// </summary>
         public string StandardNumber { get; init; } = string.Empty;
+        /// <summary>
+        /// 表编号。
+        /// </summary>
         public string TableNumber { get; init; } = string.Empty;
+        /// <summary>
+        /// 公称压力等级。
+        /// </summary>
         public string PressureRating { get; init; } = string.Empty;
+        /// <summary>
+        /// 法兰类型。
+        /// </summary>
         public string? FlangeType { get; init; }
+        /// <summary>
+        /// 法兰面类型。
+        /// </summary>
         public string? FaceType { get; init; }
+        /// <summary>
+        /// 源数据行号。
+        /// </summary>
         public int SourceRowNumber { get; init; }
+        /// <summary>
+        /// 值的 JSON 表示。
+        /// </summary>
         public string ValuesJson { get; init; } = "{}";
     }
     /// <summary>
@@ -683,16 +847,9 @@ FROM {0}.STANDARD_FLANGE_RECORDS sfr
 INNER JOIN {0}.STANDARD_SERIES ss ON ss.ID = sfr.SERIES_ID AND ss.IS_ACTIVE = 1
 INNER JOIN {0}.STANDARD_FAMILIES sf ON sf.ID = ss.FAMILY_ID AND sf.IS_ACTIVE = 1
 WHERE sf.CODE = :FamilyCode
-  AND ss.SERIES_CODE = :SeriesCode
-  AND sfr.DN = :DN
   AND sfr.DN_VALUE = :DNValue
-  AND sfr.PN = :PN
-  AND (:StandardNumber IS NULL OR ss.STANDARD_NUMBER = :StandardNumber)
-  AND (:TableNumber IS NULL OR ss.TABLE_NUMBER = :TableNumber)
-  AND (:FlangeType IS NULL OR ss.FLANGE_TYPE = :FlangeType)
-  AND (:FaceType IS NULL OR ss.FACE_TYPE = :FaceType)
   AND sfr.IS_ACTIVE = 1
-FETCH FIRST 1 ROWS ONLY";
+";
 
         Stopwatch stopwatch = Stopwatch.StartNew();
         _logger.LogInformation(
@@ -707,27 +864,21 @@ FETCH FIRST 1 ROWS ONLY";
         await using var connection = new DmConnection(GetConnectionString("DM"));
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("DM 数据库连接已打开。");
-        StandardMatchRow? row = await connection.QuerySingleOrDefaultAsync<StandardMatchRow>(
-            new CommandDefinition(string.Format(CultureInfo.InvariantCulture, sqlTemplate, schema), new
-            {
-                FamilyCode = familyCode,
-                SeriesCode = seriesCode,
-                DN = dn,
-                DNValue = dnValue,
-                PN = pn,
-                StandardNumber = NormalizeOptional(request.StandardNumber),
-                TableNumber = NormalizeOptional(request.TableNumber),
-                FlangeType = NormalizeOptional(request.FlangeType),
-                FaceType = NormalizeOptional(request.FaceType)
-            }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+        IEnumerable<StandardMatchRow> rows = await connection.QueryAsync<StandardMatchRow>(
+        new CommandDefinition(string.Format(CultureInfo.InvariantCulture, sqlTemplate, schema), new
+        {
+            FamilyCode = familyCode,
+            SeriesCode = seriesCode,
+            DNValue = dnValue
+        }, cancellationToken: cancellationToken)).ConfigureAwait(false);
 
         stopwatch.Stop();
         _logger.LogInformation(
             "DM 查询完成：是否命中={Matched}, 耗时Ms={ElapsedMilliseconds}",
-            row != null,
+            rows.Any(),
             stopwatch.ElapsedMilliseconds);
 
-        return row == null ? null : ToMatchData(row);
+        return SelectBestStaticMatch(rows, request, pn);
     }
 
     private static Dictionary<string, string> ToCadAttributes(
@@ -738,13 +889,15 @@ FETCH FIRST 1 ROWS ONLY";
         decimal? flangeInnerDiameter = selectedSeries == "Ⅱ系列"
             ? record.FlangeInnerDiameterSeriesII
             : record.FlangeInnerDiameterSeriesI;
+        string flangeType = string.IsNullOrWhiteSpace(series.FlangeType) ? "PL" : series.FlangeType.Trim();
+        string faceType = string.IsNullOrWhiteSpace(series.FaceType) ? "RF" : series.FaceType.Trim();
 
         return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["DN"] = record.DN,
             ["PN"] = record.PN,
-            ["FLG_TYPE"] = series.FlangeType ?? "PL",
-            ["FACE_TYPE"] = series.FaceType ?? "RF",
+            ["FLG_TYPE"] = flangeType,
+            ["FACE_TYPE"] = faceType,
             ["FLG_STD"] = series.StandardNumber,
             ["DRAWINGNO.STANDARDNO"] = series.StandardNumber,
             ["SERIES"] = selectedSeries,
@@ -758,7 +911,44 @@ FETCH FIRST 1 ROWS ONLY";
             ["RAISED_FACE_HGT"] = FormatNumber(record.RaisedFaceHeight)
         };
     }
+    /// <summary>
+    /// 从静态规范记录中选择最佳匹配的标准数据。
+    /// </summary>
+    /// <param name="rows">静态规范记录集合</param>
+    /// <param name="request">标准匹配请求</param>
+    /// <param name="requestedPn">请求的压力等级</param>
+    /// <returns>最佳匹配的标准数据，如果没有匹配则返回 null</returns>
+    private StandardMatchData? SelectBestStaticMatch(
+        IEnumerable<StandardMatchRow> rows,
+        StandardMatchRequest request,
+        string requestedPn)
+    {
+        string? standardNumber = NormalizeStandardNumber(request.StandardNumber);
+        string? tableNumber = NormalizeMatchOptional(request.TableNumber);
+        string? flangeType = NormalizeMatchOptional(request.FlangeType);
+        string? faceType = NormalizeMatchOptional(request.FaceType);
+        string? seriesCode = NormalizeMatchOptional(request.SeriesCode);
 
+        StandardMatchRow? best = rows
+            .Where(row => PressureEquals(row.PN, requestedPn))
+            .Where(row => standardNumber == null || NormalizeStandardNumber(row.StandardNumber) == standardNumber)
+            .Where(row => tableNumber == null || NormalizeMatchText(row.TableNumber) == tableNumber)
+            .Where(row => flangeType == null || NormalizeMatchText(row.FlangeType) == flangeType)
+            .Where(row => faceType == null || NormalizeMatchText(row.FaceType) == faceType)
+            .OrderByDescending(row => seriesCode != null && NormalizeMatchText(row.SeriesCode) == seriesCode)
+            .ThenByDescending(row => standardNumber != null && NormalizeStandardNumber(row.StandardNumber) == standardNumber)
+            .ThenByDescending(row => tableNumber != null && NormalizeMatchText(row.TableNumber) == tableNumber)
+            .ThenBy(row => row.SourceRowNumber)
+            .FirstOrDefault();
+
+        return best == null ? null : ToMatchData(best);
+    }
+    
+    /// <summary>
+    /// 将静态规范记录转换为标准匹配数据。
+    /// </summary>
+    /// <param name="row">静态规范记录</param>
+    /// <returns>标准匹配数据</returns>
     private static StandardMatchData ToMatchData(StandardMatchRow row)
     {
         var record = new FlangeStandardRecordDto
@@ -801,10 +991,18 @@ FETCH FIRST 1 ROWS ONLY";
             },
             record);
     }
-
+    
+    /// <summary>
+    /// 获取数据库类型。
+    /// </summary>
+    /// <returns>数据库类型字符串，例如 "MYSQL" 或 "DM"</returns>
     private string GetDatabaseType() =>
         (_configuration["Database:Type"] ?? "DM").Trim().ToUpperInvariant() == "MYSQL" ? "MYSQL" : "DM";
-
+    
+    /// <summary>
+    /// 获取数据库模式名称。
+    /// </summary>
+    /// <returns>数据库模式名称字符串</returns>
     private string GetSchemaName()
     {
         string schema = (_configuration["Database:Schema"] ?? "CAD_SW_LIBRARY").Trim();
@@ -815,7 +1013,12 @@ FETCH FIRST 1 ROWS ONLY";
 
         return schema.ToUpperInvariant();
     }
-
+    
+    /// <summary>
+    /// 获取数据库连接字符串。
+    /// </summary>
+    /// <param name="databaseType">数据库类型字符串，例如 "MYSQL" 或 "DM"</param>
+    /// <returns>数据库连接字符串</returns>
     private string GetConnectionString(string databaseType)
     {
         string connectionString = (_configuration["Database:ConnectionString"] ?? string.Empty).Trim();
@@ -831,18 +1034,93 @@ FETCH FIRST 1 ROWS ONLY";
 
         return connectionString;
     }
-
+    
+    /// <summary>
+    /// 标准化代码字符串。
+    /// </summary>
+    /// <param name="value">要标准化的代码字符串</param>
+    /// <returns>标准化后的代码字符串</returns>
     private static string NormalizeCode(string? value) => (value ?? string.Empty).Trim().ToUpperInvariant();
-
+    
+    /// <summary>
+    /// 标准化匹配文本字符串。
+    /// </summary>
+    /// <param name="value">要标准化的匹配文本字符串</param>
+    /// <returns>标准化后的匹配文本字符串</returns>
+    private static string NormalizeMatchText(string? value)
+    {
+        string normalized = (value ?? string.Empty).Trim().ToUpperInvariant();
+        normalized = normalized.Normalize(System.Text.NormalizationForm.FormKC);
+        return new string(normalized
+            .Where(character => !char.IsWhiteSpace(character))
+            .Select(character => character switch
+            {
+                '／' => '/',
+                '－' or '–' or '—' => '-',
+                '．' => '.',
+                '：' => ':',
+                _ => character
+            })
+            .ToArray());
+    }
+    
+    /// <summary>
+    /// 标准化标准号字符串。
+    /// </summary>
+    /// <param name="value">要标准化的标准号字符串</param>
+    /// <returns>标准化后的标准号字符串，如果为空则返回 null</returns>
+    private static string? NormalizeStandardNumber(string? value)
+    {
+        string normalized = NormalizeMatchText(value)
+            .Replace("-", "/", StringComparison.Ordinal)
+            .Replace("GB/T", "GBT", StringComparison.OrdinalIgnoreCase)
+            .Replace("GB-T", "GBT", StringComparison.OrdinalIgnoreCase);
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+    }
+    
+    /// <summary>
+    /// 标准化可选匹配文本字符串。
+    /// </summary>
+    /// <param name="value">要标准化的可选匹配文本字符串</param>
+    /// <returns>标准化后的可选匹配文本字符串，如果为空则返回 null</returns>
+    private static string? NormalizeMatchOptional(string? value)
+    {
+        string normalized = NormalizeMatchText(value);
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+    }
+    
+    /// <summary>
+    /// 标准化压力等级字符串。
+    /// </summary>
+    /// <param name="value">要标准化的压力等级字符串</param>
+    /// <returns>标准化后的压力等级字符串</returns>
+    private static string NormalizePn(string? value)
+    {
+        string normalized = NormalizeMatchText(value).Replace("PN", string.Empty, StringComparison.Ordinal);
+        return decimal.TryParse(normalized, NumberStyles.Number, CultureInfo.InvariantCulture, out decimal number)
+            ? $"PN{number.ToString("0.####", CultureInfo.InvariantCulture)}"
+            : NormalizeMatchText(value);
+    }
+    
+    /// <summary>
+    /// 标准化可选字符串。
+    /// </summary>
+    /// <param name="value">要标准化的可选字符串</param>
+    /// <returns>标准化后的可选字符串，如果为空则返回 null</returns>
     private static string? NormalizeOptional(string? value)
     {
         string normalized = NormalizeCode(value);
         return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
     }
-
+    
+    /// <summary>
+    /// 标准化公称直径字符串。
+    /// </summary>
+    /// <param name="value">要标准化的公称直径字符串</param>
+    /// <returns>标准化后的公称直径字符串</returns>
     private static string NormalizeDn(string? value)
     {
-        string normalized = (value ?? string.Empty).Trim().ToUpperInvariant().Replace(" ", string.Empty);
+        string normalized = NormalizeMatchText(value);
         if (normalized.StartsWith("DN", StringComparison.Ordinal))
         {
             return normalized;
@@ -852,7 +1130,13 @@ FETCH FIRST 1 ROWS ONLY";
             ? $"DN{dnValue}"
             : normalized;
     }
-
+    
+    /// <summary>
+    /// 解析公称直径字符串的数值部分。
+    /// </summary>
+    /// <param name="dn">公称直径字符串，例如 "DN10"</param>
+    /// <returns>公称直径的数值部分</returns>
+    /// <exception cref="ArgumentException">当公称直径格式无效时抛出异常</exception>
     private static int ParseDnValue(string dn)
     {
         if (!int.TryParse(dn[2..], NumberStyles.Integer, CultureInfo.InvariantCulture, out int value) || value <= 0)
@@ -862,7 +1146,12 @@ FETCH FIRST 1 ROWS ONLY";
 
         return value;
     }
-
+    
+    /// <summary>
+    /// 标准化系列字符串。
+    /// </summary>
+    /// <param name="value">要标准化的系列字符串</param>
+    /// <returns>标准化后的系列字符串</returns>
     private static string NormalizeSeries(string? value)
     {
         string normalized = (value ?? string.Empty).Trim();
@@ -870,10 +1159,20 @@ FETCH FIRST 1 ROWS ONLY";
             ? "Ⅱ系列"
             : "Ⅰ系列";
     }
-
+    
+    /// <summary>
+    /// 格式化数字为字符串。
+    /// </summary>
+    /// <param name="value">要格式化的数字</param>
+    /// <returns>格式化后的数字字符串，如果为空则返回空字符串</returns>
     private static string FormatNumber(decimal? value) =>
         value?.ToString("0.####", CultureInfo.InvariantCulture) ?? string.Empty;
-
+    
+    /// <summary>
+    /// 反序列化字典。
+    /// </summary>
+    /// <param name="json">要反序列化的 JSON 字符串</param>
+    /// <returns>反序列化后的字典，如果为空或无效则返回空字典</returns>
     private static Dictionary<string, string> DeserializeDictionary(string? json)
     {
         if (string.IsNullOrWhiteSpace(json))
@@ -891,7 +1190,12 @@ FETCH FIRST 1 ROWS ONLY";
             return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
     }
-
+    
+    /// <summary>
+    /// 反序列化列表。
+    /// </summary>
+    /// <param name="json">要反序列化的 JSON 字符串</param>
+    /// <returns>反序列化后的列表，如果为空或无效则返回空列表</returns>
     private static List<string> DeserializeList(string? json)
     {
         if (string.IsNullOrWhiteSpace(json))
@@ -909,52 +1213,180 @@ FETCH FIRST 1 ROWS ONLY";
         }
     }
 
+
+
+    /// <summary>
+    /// 表示从数据库查询到的标准匹配行数据。
+    /// </summary>
     private sealed class StandardMatchRow
     {
+        /// <summary>
+        /// 获取或初始化系列 ID。
+        /// </summary>
         public long SeriesId { get; init; }
+        /// <summary>
+        /// 获取或初始化家族代码。
+        /// </summary>
         public string FamilyCode { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化家族名称。
+        /// </summary>
         public string FamilyName { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化系列代码。
+        /// </summary>
         public string SeriesCode { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化系列名称。
+        /// </summary>
         public string SeriesName { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化标准编号。
+        /// </summary>
         public string StandardNumber { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化表编号。
+        /// </summary>
         public string TableNumber { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化压力等级。
+        /// </summary>  
         public string PressureRating { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化法兰类型。
+        /// </summary>
         public string? FlangeType { get; init; }
+        /// <summary>
+        /// 获取或初始化法兰面类型。
+        /// </summary>
         public string? FaceType { get; init; }
+        /// <summary>
+        /// 获取或初始化记录 ID。
+        /// </summary>
         public long RecordId { get; init; }
+        /// <summary>
+        /// 获取或初始化源行号。
+        /// </summary>
         public int SourceRowNumber { get; init; }
+        /// <summary>
+        /// 获取或初始化公称直径。
+        /// </summary>
         public string DN { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化公称直径值。
+        /// </summary>
         public int DNValue { get; init; }
+        /// <summary>
+        /// 获取或初始化公称压力。
+        /// </summary>
         public string PN { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化系列 I 管外径。
+        /// </summary>
         public decimal? PipeOuterDiameterSeriesI { get; init; }
+        /// <summary>
+        /// 获取或初始化系列 II 管外径。
+        /// </summary>  
         public decimal? PipeOuterDiameterSeriesII { get; init; }
+        /// <summary>
+        /// 获取或初始化法兰外径。
+        /// </summary>
         public decimal? FlangeOuterDiameter { get; init; }
+        /// <summary>
+        /// 获取或初始化螺栓圆直径。
+        /// </summary>
         public decimal? BoltCircleDiameter { get; init; }
+        /// <summary>
+        /// 获取或初始化螺栓孔直径。
+        /// </summary>
         public decimal? BoltHoleDiameter { get; init; }
+        /// <summary>
+        /// 获取或初始化螺栓数量。
+        /// </summary>
         public int? BoltCount { get; init; }
+        /// <summary>
+        /// 获取或初始化螺栓规格。
+        /// </summary>
         public string? BoltSpecification { get; init; }
+        /// <summary>
+        /// 获取或初始化螺栓原始后缀。
+        /// </summary>
         public string? BoltRawSuffix { get; init; }
+        /// <summary>
+        /// 获取或初始化法兰厚度。
+        /// </summary>
         public decimal? FlangeThickness { get; init; }
+        /// <summary>
+        /// 获取或初始化凸面高度。
+        /// </summary>
         public decimal? RaisedFaceHeight { get; init; }
+        /// <summary>
+        /// 获取或初始化系列 I 法兰内径。
+        /// </summary>
         public decimal? FlangeInnerDiameterSeriesI { get; init; }
+        /// <summary>
+        /// 获取或初始化系列 II 法兰内径。
+        /// </summary>
         public decimal? FlangeInnerDiameterSeriesII { get; init; }
+        /// <summary>
+        /// 获取或初始化原始值的 JSON 表示。
+        /// </summary>
         public string? RawValuesJson { get; init; }
+        /// <summary>
+        /// 获取或初始化警告信息的 JSON 表示。
+        /// </summary>
         public string? WarningsJson { get; init; }
     }
-
+    /// <summary>
+    /// 表示标准系列数据。
+    /// </summary>
     private sealed class StandardSeriesData
     {
+        /// <summary>
+        /// 获取或初始化系列 ID。
+        /// </summary>
         public long Id { get; init; }
+        /// <summary>
+        /// 获取或初始化系列代码。
+        /// </summary>  
         public string FamilyCode { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化系列名称。
+        /// </summary>
         public string FamilyName { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化系列代码。
+        /// </summary>
         public string SeriesCode { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化系列名称。
+        /// </summary>
         public string SeriesName { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化标准编号。
+        /// </summary>
         public string StandardNumber { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化表编号。
+        /// </summary>
         public string TableNumber { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化压力等级。
+        /// </summary>
         public string PressureRating { get; init; } = string.Empty;
+        /// <summary>
+        /// 获取或初始化法兰类型。
+        /// </summary>
         public string? FlangeType { get; init; }
+        /// <summary>
+        /// 获取或初始化法兰面类型。
+        /// </summary>
         public string? FaceType { get; init; }
     }
-
+    /// <summary>
+    /// 表示标准匹配数据，包括系列数据和记录数据。
+    /// </summary>
+    /// <param name="Series">系列数据。</param>
+    /// <param name="Record">记录数据。</param>
     private sealed record StandardMatchData(StandardSeriesData Series, FlangeStandardRecordDto Record);
 }

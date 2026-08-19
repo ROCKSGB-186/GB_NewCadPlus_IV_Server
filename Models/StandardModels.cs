@@ -170,6 +170,9 @@ public sealed class StandardMatchRequest
     /// <summary>钢管系列，支持 Ⅰ系列或Ⅱ系列。</summary>
     public string Series { get; init; } = "Ⅰ系列";
 
+    /// <summary>连接方式，例如法兰或对夹；不等同于法兰类型编码。</summary>
+    public string? ConnectionMode { get; init; }
+
     /// <summary>法兰类型，例如 PL。</summary>
     public string? FlangeType { get; init; }
 

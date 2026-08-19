@@ -60,6 +60,37 @@ public sealed class StandardsController : ControllerBase
         catch (KeyNotFoundException ex) { return NotFound(new { success = false, message = ex.Message }); }
     }
 
+    /// <summary>
+    /// 重命名基础规范号，例如将文件名中的 GB-T 9124.1-2019 修正为 GB/T 9124.1-2019。
+    /// </summary>
+    [HttpPut("management/documents/{documentId:long}/name")]
+    [ProducesResponseType(typeof(StandardManagementOperationResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<StandardManagementOperationResponse>> RenameManagementDocumentAsync(
+        long documentId,
+        [FromBody] StandardDocumentRenameRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!StandardManagementAuthorization.IsAdministrator(Request, out string operatorName))
+            return StatusCode(StatusCodes.Status403Forbidden, new { success = false, message = "只有 sa、SYSDBA、admin 可以管理规范库。" });
+
+        try
+        {
+            await _standardManagementCommandService.RenameDocumentAsync(
+                documentId,
+                request?.Name ?? string.Empty,
+                operatorName,
+                cancellationToken).ConfigureAwait(false);
+            return Ok(new StandardManagementOperationResponse
+            {
+                Success = true,
+                Message = "基础规范号重命名成功。",
+                Id = documentId
+            });
+        }
+        catch (ArgumentException ex) { return BadRequest(new { success = false, message = ex.Message }); }
+        catch (KeyNotFoundException ex) { return NotFound(new { success = false, message = ex.Message }); }
+    }
+
     [HttpGet("dynamic/versions/{versionId:long}/content")]
     [ProducesResponseType(typeof(DynamicStandardContentResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<DynamicStandardContentResponse>> GetDynamicContentByVersionAsync(

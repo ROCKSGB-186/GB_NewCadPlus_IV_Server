@@ -21,6 +21,14 @@ public sealed class StandardVersionRenameRequest
     public string Name { get; init; } = string.Empty;
 }
 
+/// <summary>
+/// 修改基础规范号显示值的请求参数。
+/// </summary>
+public sealed class StandardDocumentRenameRequest
+{
+    public string Name { get; init; } = string.Empty;
+}
+
 public sealed class StandardImportCommitRequest
 {
     /// <summary>预览接口返回的临时批次标识。</summary>

@@ -50,6 +50,51 @@ public sealed class StandardManagementCommandService
         _logger.LogInformation("动态规范细分重命名成功：VersionId={VersionId}, Name={Name}, Operator={OperatorName}", versionId, name.Trim(), operatorName);
     }
 
+    /// <summary>
+    /// 修改基础规范号，不修改其下属规范系列及实际规范记录。
+    /// </summary>
+    public async Task RenameDocumentAsync(
+        long documentId,
+        string standardNumber,
+        string operatorName,
+        CancellationToken cancellationToken = default)
+    {
+        if (documentId <= 0) throw new ArgumentException("基础规范号 ID 必须大于 0。", nameof(documentId));
+        if (string.IsNullOrWhiteSpace(standardNumber)) throw new ArgumentException("基础规范号不能为空。", nameof(standardNumber));
+        if (string.IsNullOrWhiteSpace(operatorName)) throw new ArgumentException("操作用户名不能为空。", nameof(operatorName));
+
+        string databaseType = GetDatabaseType();
+        string schema = GetSchemaName();
+        string table = databaseType == "DM" ? $"{schema}.STANDARD_DOCUMENTS" : "standard_documents";
+        string parameter = databaseType == "DM" ? ":" : "@";
+        string normalizedNumber = NormalizeStandardNumber(standardNumber);
+
+        await using DbConnection connection = await OpenConnectionAsync(databaseType, cancellationToken).ConfigureAwait(false);
+        int affected = await connection.ExecuteAsync(new CommandDefinition(
+            $"UPDATE {table} SET STANDARD_NUMBER={parameter}StandardNumber,UPDATED_AT=CURRENT_TIMESTAMP WHERE ID={parameter}Id AND IS_ACTIVE=1",
+            new { Id = documentId, StandardNumber = normalizedNumber },
+            cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        if (affected == 0)
+            throw new KeyNotFoundException("基础规范号不存在或已停用。");
+
+        _logger.LogInformation(
+            "基础规范号重命名成功：DocumentId={DocumentId}, StandardNumber={StandardNumber}, Operator={OperatorName}",
+            documentId,
+            normalizedNumber,
+            operatorName);
+    }
+
+    private static string NormalizeStandardNumber(string value)
+    {
+        string normalized = value.Trim().Normalize(System.Text.NormalizationForm.FormKC);
+        return System.Text.RegularExpressions.Regex.Replace(
+            normalized,
+            @"^GB\s*[-/]\s*T\s*",
+            "GB/T ",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    }
+
     public async Task MoveSeriesAsync(
         long seriesId,
         long categoryId,
