@@ -1,6 +1,8 @@
 using GB_NewCadPlus_IV.UploadApi.Services;
 using GB_NewCadPlus_IV.UploadApi.Filters;
 using GB_NewCadPlus_IV_Server.Services;
+using Microsoft.AspNetCore.Diagnostics;
+using System.Text.Json;
 
 
  // 1. 创建 Web 应用: 初始化 ASP.NET Core 应用构建器，它会读取配置文件（如 appsettings.json）、环境变量等。
@@ -88,6 +90,28 @@ builder.Services.AddScoped<OperationLogFilter>();
 
 // 5. 构建应用: 创建 Web 应用实例，准备处理 HTTP 请求。根据上面注册的配置构建出可运行的应用对象。
 var app = builder.Build();
+
+// 统一异常处理：避免向客户端泄露数据库连接异常和服务器堆栈，详细异常由服务端日志记录。
+app.UseExceptionHandler(exceptionApp =>
+{
+    exceptionApp.Run(async context =>
+    {
+        var exceptionFeature = context.Features.Get<IExceptionHandlerFeature>();
+        var logger = context.RequestServices.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("GlobalExceptionHandler");
+
+        if (exceptionFeature?.Error != null)
+            logger.LogError(exceptionFeature.Error, "未处理的 API 异常。Path={Path}", context.Request.Path);
+
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+        context.Response.ContentType = "application/json; charset=utf-8";
+        await context.Response.WriteAsync(JsonSerializer.Serialize(new
+        {
+            success = false,
+            message = "服务器内部错误，请联系管理员。"
+        }));
+    });
+});
 
 // 6. 配置开发环境中间件: 定义 HTTP 请求处理流程。根据环境条件启用 Swagger UI，强制使用 HTTPS，启用授权中间件，并映射控制器路由。
 if (app.Environment.IsDevelopment())

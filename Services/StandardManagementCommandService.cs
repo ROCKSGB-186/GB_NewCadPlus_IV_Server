@@ -27,6 +27,32 @@ public sealed class StandardManagementCommandService
     }
 
     /// <summary>
+    /// 软删除一个带表号或压力等级的具体规范系列，保留版本和实际数据，便于后续恢复。
+    /// </summary>
+    public async Task SoftDeleteSubdivisionSeriesAsync(
+        long seriesId,
+        string operatorName,
+        CancellationToken cancellationToken = default)
+    {
+        if (seriesId <= 0) throw new ArgumentException("规范系列 ID 必须大于 0。", nameof(seriesId));
+        if (string.IsNullOrWhiteSpace(operatorName)) throw new ArgumentException("操作用户名不能为空。", nameof(operatorName));
+
+        string databaseType = GetDatabaseType();
+        string schema = GetSchemaName();
+        string seriesTable = databaseType == "DM" ? $"{schema}.STANDARD_SERIES" : "standard_series";
+        string parameter = databaseType == "DM" ? ":" : "@";
+        await using DbConnection connection = await OpenConnectionAsync(databaseType, cancellationToken).ConfigureAwait(false);
+        int affected = await connection.ExecuteAsync(new CommandDefinition(
+            $"UPDATE {seriesTable} SET IS_ACTIVE=0,UPDATED_AT=CURRENT_TIMESTAMP WHERE ID={parameter}Id AND IS_ACTIVE=1 AND (COALESCE(TABLE_NUMBER, '')<>'' OR COALESCE(PRESSURE_RATING, '')<>'')",
+            new { Id = seriesId }, cancellationToken: cancellationToken)).ConfigureAwait(false);
+
+        if (affected == 0)
+            throw new KeyNotFoundException("具体规范不存在、已删除，或该节点不是可删除的表号/PN规范。" );
+
+        _logger.LogInformation("具体规范已软删除：SeriesId={SeriesId}, Operator={OperatorName}", seriesId, operatorName);
+    }
+
+    /// <summary>
     /// 修改动态规范细分的显示名称，不修改版本号和动态内容。
     /// </summary>
     public async Task RenameVersionAsync(long versionId, string name, string operatorName, CancellationToken cancellationToken = default)

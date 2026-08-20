@@ -1,6 +1,7 @@
 using GB_NewCadPlus_IV.UploadApi.Filters;
 using GB_NewCadPlus_IV.UploadApi.Models;
 using GB_NewCadPlus_IV.UploadApi.Services;
+using Dm;
 using Microsoft.AspNetCore.Mvc;
 
 namespace GB_NewCadPlus_IV.UploadApi.Controllers;
@@ -31,6 +32,15 @@ public sealed class DepartmentsController : ControllerBase
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             return new EmptyResult();
+        }
+        catch (DmException ex)
+        {
+            _logger.LogError(ex, "部门查询时连接达梦数据库失败。DatabaseType=DM");
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                success = false,
+                message = "数据库服务暂时不可用，请稍后重试。"
+            });
         }
         catch (Exception ex)
         {

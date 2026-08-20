@@ -34,7 +34,20 @@ public sealed class DepartmentQueryService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "查询部门失败。DatabaseType={DatabaseType}", databaseType);
+            if (databaseType == "DM")
+            {
+                string connectionString = GetConnectionString("DM");
+                _logger.LogError(
+                    ex,
+                    "查询部门失败。DatabaseType=DM, Server={Server}, Port={Port}, Schema={Schema}",
+                    GetConnectionValue(connectionString, "Server"),
+                    GetConnectionValue(connectionString, "Port"),
+                    GetSchemaName());
+            }
+            else
+            {
+                _logger.LogError(ex, "查询部门失败。DatabaseType={DatabaseType}", databaseType);
+            }
             throw;
         }
     }
@@ -65,6 +78,12 @@ public sealed class DepartmentQueryService
     private async Task<IReadOnlyList<DepartmentDto>> QueryDmAsync(CancellationToken cancellationToken)
     {
         string schema = GetSchemaName();
+        string connectionString = GetConnectionString("DM");
+        _logger.LogInformation(
+            "开始连接达梦数据库。Server={Server}, Port={Port}, Schema={Schema}",
+            GetConnectionValue(connectionString, "Server"),
+            GetConnectionValue(connectionString, "Port"),
+            schema);
         string sql = $@"
             SELECT d.ID AS Id,
                    d.CAD_CATEGORY_ID AS CadCategoryId,
@@ -81,9 +100,23 @@ public sealed class DepartmentQueryService
                 OR EXISTS (SELECT 1 FROM {schema}.CAD_CATEGORIES c WHERE c.ID = d.CAD_CATEGORY_ID)
             ORDER BY d.SORT_ORDER, d.ID";
 
-        await using var connection = new DmConnection(GetConnectionString("DM"));
+        await using var connection = new DmConnection(connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         return (await connection.QueryAsync<DepartmentDto>(new CommandDefinition(sql, cancellationToken: cancellationToken)).ConfigureAwait(false)).AsList();
+    }
+
+    private static string GetConnectionValue(string connectionString, string key)
+    {
+        foreach (string part in connectionString.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int separator = part.IndexOf('=');
+            if (separator <= 0 || !part[..separator].Trim().Equals(key, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            return part[(separator + 1)..].Trim();
+        }
+
+        return "未配置";
     }
 
     private string GetDatabaseType() => (_configuration["Database:Type"] ?? "DM").Trim().ToUpperInvariant() == "MYSQL" ? "MYSQL" : "DM";

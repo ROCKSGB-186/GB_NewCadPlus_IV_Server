@@ -233,6 +233,28 @@ public sealed class StandardsController : ControllerBase
         catch (KeyNotFoundException ex) { return NotFound(new { success = false, message = ex.Message }); }
     }
 
+    /// <summary>
+    /// 软删除指定表号/压力等级的具体规范，不删除同一部件系列的其他规范。
+    /// </summary>
+    [HttpDelete("management/series/{seriesId:long}")]
+    public async Task<ActionResult<StandardManagementOperationResponse>> DeleteManagementSubdivisionSeriesAsync(
+        long seriesId,
+        CancellationToken cancellationToken)
+    {
+        if (!StandardManagementAuthorization.IsAdministrator(Request, out string operatorName))
+            return StatusCode(StatusCodes.Status403Forbidden, new { success = false, message = "只有 sa、SYSDBA、admin 可以管理规范库。" });
+
+        try
+        {
+            await _standardManagementCommandService
+                .SoftDeleteSubdivisionSeriesAsync(seriesId, operatorName, cancellationToken)
+                .ConfigureAwait(false);
+            return Ok(new StandardManagementOperationResponse { Success = true, Message = "具体规范已删除，历史数据已保留。", Id = seriesId });
+        }
+        catch (ArgumentException ex) { return BadRequest(new { success = false, message = ex.Message }); }
+        catch (KeyNotFoundException ex) { return NotFound(new { success = false, message = ex.Message }); }
+    }
+
     [HttpPost("management/categories/{categoryId:long}/move")]
     public async Task<ActionResult<StandardManagementOperationResponse>> MoveManagementCategoryAsync(
         long categoryId,

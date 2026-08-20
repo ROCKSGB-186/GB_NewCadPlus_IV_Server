@@ -45,6 +45,23 @@ public sealed class StandardManagementQueryService
                 result.categories.Count,
                 result.series.Count);
 
+            foreach (StandardManagementSeriesDto seriesItem in result.series.Where(item => Regex.IsMatch(
+                item.SeriesName ?? string.Empty,
+                @"^表\s*[0-9０-９]+\s*(?:[/／_\-－—、，,：:]\s*)?PN",
+                RegexOptions.IgnoreCase)))
+            {
+                _logger.LogWarning(
+                    "规范树检测到细分名称被写入系列名称：SeriesId={SeriesId}, SeriesName={SeriesName}, StandardDocumentId={StandardDocumentId}, SourceFileName={SourceFileName}, TableNumber={TableNumber}, PressureRating={PressureRating}, FlangeType={FlangeType}, FaceType={FaceType}",
+                    seriesItem.Id,
+                    seriesItem.SeriesName,
+                    seriesItem.StandardDocumentId,
+                    Path.GetFileName(seriesItem.SourceFileName ?? string.Empty),
+                    seriesItem.TableNumber,
+                    seriesItem.PressureRating,
+                    seriesItem.FlangeType,
+                    seriesItem.FaceType);
+            }
+
             return new StandardManagementTreeResponse
             {
                 Success = true,
@@ -293,22 +310,22 @@ public sealed class StandardManagementQueryService
         // 只有版本标签为空或无法解析时，才使用导入批次文件名兼容历史数据。
         string fileName = Path.GetFileNameWithoutExtension(versionLabel ?? string.Empty);
         Match match = Regex.Match(fileName,
-            @"(?<table>表\s*[0-9０-９]+)\s*(?:[_\-－—、，,：: ]\s*)?(?<pn>PN\s*[0-9０-９]+(?:[.．][0-9０-９]+)?)",
+            @"(?<table>表\s*[0-9０-９]+)\s*(?:[/／_\-－—、，,：: ]\s*)?(?<pn>PN\s*[0-9０-９]+(?:[.．][0-9０-９]+)?)",
             RegexOptions.IgnoreCase);
         if (match.Success)
         {
-            return $"{NormalizeDynamicPart(match.Groups["table"].Value)}_{NormalizeDynamicPart(match.Groups["pn"].Value).ToUpperInvariant()}";
+            return $"{NormalizeDynamicPart(match.Groups["table"].Value)} / {NormalizeDynamicPart(match.Groups["pn"].Value).ToUpperInvariant()}";
         }
 
         // 历史版本可能没有规范的 VERSION_LABEL，此时再从原始文件名恢复显示名称。
         fileName = Path.GetFileNameWithoutExtension(sourceFileName ?? string.Empty);
         match = Regex.Match(fileName,
-            @"(?<table>表\s*[0-9０-９]+)\s*(?:[_\-－—、，,：: ]\s*)?(?<pn>PN\s*[0-9０-９]+(?:[.．][0-9０-９]+)?)",
+            @"(?<table>表\s*[0-9０-９]+)\s*(?:[/／_\-－—、，,：: ]\s*)?(?<pn>PN\s*[0-9０-９]+(?:[.．][0-9０-９]+)?)",
             RegexOptions.IgnoreCase);
         if (!match.Success)
             return versionLabel?.Trim() ?? string.Empty;
 
-        return $"{NormalizeDynamicPart(match.Groups["table"].Value)}_{NormalizeDynamicPart(match.Groups["pn"].Value).ToUpperInvariant()}";
+        return $"{NormalizeDynamicPart(match.Groups["table"].Value)} / {NormalizeDynamicPart(match.Groups["pn"].Value).ToUpperInvariant()}";
     }
 
     private static string NormalizeDynamicPart(string value)
@@ -360,7 +377,8 @@ public sealed class StandardManagementQueryService
                    series_name AS SeriesName, standard_number AS StandardNumber,
                    table_number AS TableNumber, pressure_rating AS PressureRating,
                    COALESCE(flange_type, '') AS FlangeType,
-                   COALESCE(face_type, '') AS FaceType
+                    COALESCE(face_type, '') AS FaceType,
+                    COALESCE((SELECT MAX(b.source_file_name) FROM standard_import_batches b WHERE b.series_id = ss.id), '') AS SourceFileName
              FROM standard_series ss
              INNER JOIN standard_families sf ON sf.id = ss.family_id AND sf.is_active = 1
              WHERE ss.is_active = 1
@@ -403,7 +421,8 @@ public sealed class StandardManagementQueryService
                    SERIES_NAME AS SeriesName, STANDARD_NUMBER AS StandardNumber,
                    TABLE_NUMBER AS TableNumber, PRESSURE_RATING AS PressureRating,
                    COALESCE(FLANGE_TYPE, '') AS FlangeType,
-                   COALESCE(FACE_TYPE, '') AS FaceType
+                    COALESCE(FACE_TYPE, '') AS FaceType,
+                    COALESCE((SELECT MAX(b.SOURCE_FILE_NAME) FROM {schema}.STANDARD_IMPORT_BATCHES b WHERE b.SERIES_ID = ss.ID), '') AS SourceFileName
              FROM {schema}.STANDARD_SERIES ss
              INNER JOIN {schema}.STANDARD_FAMILIES sf ON sf.ID = ss.FAMILY_ID AND sf.IS_ACTIVE = 1
              WHERE ss.IS_ACTIVE = 1

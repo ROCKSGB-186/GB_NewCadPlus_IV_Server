@@ -49,6 +49,8 @@ public sealed class StandardManagementSeriesDto
     public string PressureRating { get; init; } = string.Empty;
     public string FlangeType { get; init; } = string.Empty;
     public string FaceType { get; init; } = string.Empty;
+    /// <summary>动态导入时保留的原始文件名，用于在展示层恢复被误改前的系列名称。</summary>
+    public string SourceFileName { get; init; } = string.Empty;
 }
 
 /// <summary>
